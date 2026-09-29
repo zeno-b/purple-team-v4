@@ -897,8 +897,6 @@ def phase_network() -> None:
     exe.run("nltest", ["/domain_trusts"], "T1482", "Domain trusts")
     exe.reg("query", r"HKCU\Software\Microsoft\Terminal Server Client\Servers", "T1018", "RDP history")
     exe.run("netsh", ["interface", "portproxy", "show", "all"], "T1090", "Port proxy rules")
-    exe.ps("Get-VpnConnection -ErrorAction SilentlyContinue | "
-           "Select-Object Name,ServerAddress,ConnectionStatus,TunnelType | Format-Table", "T1133", "VPN connections")
     exe.run("netsh", ["wlan", "show", "interfaces"], "T1016", "WiFi interfaces")
     exe.cmd(r'type C:\\\\Windows\\\\System32\\\\drivers\\\\etc\\\\hosts | findstr /v "^#" | findstr /v "^$"',
             "T1565.001", "Hosts file")
