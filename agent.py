@@ -2034,26 +2034,31 @@ def generate_html_report() -> None:
 
     # ── AV Coverage table ────────────────────────────────────────────────────
     eicar_rows = ""
-    blocked = sum(1 for r in log.detection_results if r.outcome == "BLOCKED")
-    detected = sum(1 for r in log.detection_results if r.outcome == "DETECTED")
-    missed   = sum(1 for r in log.detection_results if r.outcome == "MISSED")
+    executed    = sum(1 for r in log.detection_results if r.outcome == "EXECUTED")
+    blocked     = sum(1 for r in log.detection_results if r.outcome == "BLOCKED")
+    errors      = sum(1 for r in log.detection_results if r.outcome == "ERROR")
     total_eicar = len(log.detection_results)
+    _dr_denom   = executed + blocked
+    _dr         = (blocked / _dr_denom * 100) if _dr_denom > 0 else None
+    detection_rate_str   = f"{_dr:.0f}%" if _dr is not None else "N/A"
+    detection_rate_color = ("#16a34a" if _dr is not None and _dr >= 75
+                            else "#ca8a04" if _dr is not None and _dr >= 50
+                            else "#dc2626")
     for r in log.detection_results:
-        col = outcome_colors.get(r.outcome, "#6b7280")
         col = outcome_colors.get(r.outcome, "#6b7280")
         eicar_rows += f"""
         <tr>
           <td>{html.escape(r.test_id)}</td>
           <td>{html.escape(r.test_name)}</td>
           <td><code>{html.escape(r.technique)}</code></td>
-          <td><span class=\"badge\" style=\"background:{col};color:#fff\">{html.escape(r.outcome)}</span></td>
-          <td style=\"font-size:.8rem\">{html.escape(r.detail[:80])}</td>
+          <td><span class="badge" style="background:{col};color:#fff">{html.escape(r.outcome)}</span></td>
+          <td style="font-size:.8rem">{html.escape(r.detail[:80])}</td>
         </tr>"""
     eicar_summary = (
         f'<div style="display:flex;gap:1rem;margin-top:1rem;flex-wrap:wrap">'
+        f'<span class="badge" style="background:#ea580c;color:#fff">Executed&nbsp;(gaps)&nbsp;{executed}</span>'
         f'<span class="badge" style="background:#16a34a;color:#fff">Blocked&nbsp;{blocked}</span>'
-        f'<span class="badge" style="background:#ea580c;color:#fff">Executed&nbsp;{executed}</span>'
-        f'<span class="badge" style="background:#dc2626;color:#fff">Missed&nbsp;{missed}</span>'
+        f'<span class="badge" style="background:{detection_rate_color};color:#fff">Detection&nbsp;Rate&nbsp;{detection_rate_str}</span>'
         f'<span class="badge" style="background:#334155;color:#fff">Total&nbsp;{total_eicar}</span>'
         f'</div>'
     ) if total_eicar else ""
@@ -2148,12 +2153,12 @@ footer{{text-align:center;color:var(--muted);font-size:.8rem;margin-top:2rem;pad
 
 <div class="grid">
 <div class="stat-card"><div class="number">{exe.total}</div><div class="label">Total Actions</div></div>
-<div class="stat-card"><div class="number" style="color:#16a34a">{exe.ok}</div><div class="label">Successful</div></div>
-<div class="stat-card"><div class="number" style="color:#dc2626">{exe.fail}</div><div class="label">Failed</div></div>
-<div class="stat-card"><div class="number" style="color:#ca8a04">{exe.skip}</div><div class="label">Skipped</div></div>
+<div class="stat-card"><div class="number" style="color:#16a34a">{exe.ok}</div><div class="label">Detected / Completed</div></div>
+<div class="stat-card"><div class="number" style="color:#dc2626">{exe.fail}</div><div class="label">Blocked / Failed</div></div>
 <div class="stat-card"><div class="number">{len(log.findings)}</div><div class="label">Findings</div></div>
-<div class="stat-card"><div class="number" style="color:#ea580c">{executed}</div><div class="label">TTP Executed</div></div>
-<div class="stat-card"><div class="number" style="color:#16a34a">{blocked}</div><div class="label">TTP Blocked</div></div>
+<div class="stat-card"><div class="number" style="color:#ea580c">{executed}</div><div class="label">TTPs Executed (gaps)</div></div>
+<div class="stat-card"><div class="number" style="color:#16a34a">{blocked}</div><div class="label">TTPs Blocked</div></div>
+<div class="stat-card"><div class="number" style="color:{detection_rate_color}">{detection_rate_str}</div><div class="label">Detection Rate</div></div>
 <div class="stat-card"><div class="number">{_elapsed(log.start)}</div><div class="label">Duration</div></div>
 </div>
 
@@ -2326,66 +2331,124 @@ def show_banner() -> None:
 def generate_summary(gen_report: bool = False) -> None:
     dur = int(time.time() - log.start)
     m, s = dur // 60, dur % 60
+
+    # ── Detection metrics from phase 12 ──────────────────────────────────
+    dt_executed = [r for r in log.detection_results if r.outcome == "EXECUTED"]
+    dt_blocked  = [r for r in log.detection_results if r.outcome == "BLOCKED"]
+    dt_total    = len(dt_executed) + len(dt_blocked)
+    # Detection/block rate: TTPs the blue team's controls stopped vs. all TTPs tested
+    detect_rate = (len(dt_blocked) / dt_total * 100) if dt_total > 0 else None
+
+    # ── Findings grouped by severity ──────────────────────────────────────
+    sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    sev_col   = {"CRITICAL": C.R, "HIGH": C.R, "MEDIUM": C.Y, "LOW": C.CYN, "INFO": C.D}
+    sev_counts: Dict[str, int] = {}
+    for f in log.findings:
+        sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
+
+    # ── Terminal output ───────────────────────────────────────────────────
     print()
     print(f"{C.CYN}╔═══════════════════════════════════════════════════════════════════════╗{C.RS}")
     print(f"{C.CYN}║{C.RS} {C.W}EXECUTION SUMMARY{C.RS}                                     {C.CYN}║{C.RS}")
     print(f"{C.CYN}╚═══════════════════════════════════════════════════════════════════════╝{C.RS}")
     print()
-    print(f"  {'Duration:':<20} {m}m {s}s")
-    print(f"  {'Total Actions:':<20} {exe.total}")
-    print(f"  {C.G}{'Successful:':<20}{C.RS} {exe.ok}")
-    print(f"  {C.R}{'Failed:':<20}{C.RS} {exe.fail}")
-    print(f"  {C.Y}{'Skipped:':<20}{C.RS} {exe.skip}")
-    if exe.total > 0:
-        sr = (exe.ok / exe.total) * 100
-        print(f"  {'Success Rate:':<20} {sr:.1f}%")
+    print(f"  {'Duration:':<26} {m}m {s}s")
+    print(f"  {'Total Actions:':<26} {exe.total}")
+    print(f"  {C.G}{'Detected / Completed:':<26}{C.RS} {exe.ok}")
+    print(f"  {C.R}{'Blocked / Failed:':<26}{C.RS} {exe.fail}")
+    print(f"  {C.Y}{'Skipped:':<26}{C.RS} {exe.skip}")
     print()
+
+    # ── Security detection metrics ────────────────────────────────────────
+    if dt_total > 0:
+        print(f"  {C.W}── Phase 12 — Detection Effectiveness ──{C.RS}")
+        ex_col = C.R if dt_executed else C.G
+        bl_col = C.G if dt_blocked  else C.Y
+        print(f"  {ex_col}{'TTPs Executed (not blocked):':<26}{C.RS} {len(dt_executed)}/{dt_total}"
+              f"  ← {C.R}detection gaps{C.RS}")
+        print(f"  {bl_col}{'TTPs Blocked by controls:':<26}{C.RS} {len(dt_blocked)}/{dt_total}"
+              f"  ← {C.G}controls working{C.RS}")
+        rate_col = C.G if detect_rate and detect_rate >= 75 else C.Y if detect_rate and detect_rate >= 50 else C.R
+        print(f"  {rate_col}{'Detection / Block Rate:':<26}{C.RS} {detect_rate:.1f}%")
+        print()
+        if dt_executed:
+            print(f"  {C.R}TTPs that ran undetected (blue team gaps):{C.RS}")
+            for r in dt_executed:
+                print(f"    {C.R}✗{C.RS} {r.test_id} {r.test_name} [{r.technique}]")
+                print(f"      {C.D}{r.detail}{C.RS}")
+        if dt_blocked:
+            print(f"  {C.G}TTPs blocked by security controls:{C.RS}")
+            for r in dt_blocked:
+                print(f"    {C.G}✓{C.RS} {r.test_id} {r.test_name} [{r.technique}]")
+                print(f"      {C.D}{r.detail}{C.RS}")
+        print()
+
+    # ── Findings list ─────────────────────────────────────────────────────
+    print(f"  {C.W}── Findings ({len(log.findings)}) ──{C.RS}")
+    if log.findings:
+        for f in log.findings:
+            col = sev_col.get(f.severity, C.W)
+            print(f"  {col}[{f.severity}]{C.RS} {f.message}")
+    else:
+        print(f"  {C.D}No findings recorded.{C.RS}")
+    print()
+
+    # ── Output files ──────────────────────────────────────────────────────
     print(f"  {C.W}── Output Files ──{C.RS}")
     print(f"  Text Log:    {log.txt}")
     print(f"  JSON Log:    {log.json}")
     print(f"  HTML Report: {log.html}")
     print()
-    print(f"  {C.W}── Findings Summary ──{C.RS}")
-    sev_counts: Dict[str, int] = {}
-    for f in log.findings:
-        sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
-    for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
-        if sev in sev_counts:
-            col = {"CRITICAL": C.R, "HIGH": C.R, "MEDIUM": C.Y, "LOW": C.CYN, "INFO": C.D}.get(sev, C.W)
-            print(f"  {col}[{sev}]{C.RS}: {sev_counts[sev]}")
-    print()
-    print(f"  {C.W}── Blue Team Detection Hints ──{C.RS}")
-    print()
-    print(f"  {C.W}Standard Indicators:{C.RS}")
-    print(f"  • Process Creation EventID 4688 (LOLBAS binaries)")
-    print(f"  • Command-line logging for wmic.exe, reg.exe, netsh.exe")
-    print(f"  • Registry Access EventID 4657")
-    print(f"  • Network Connection EventID 5156")
-    print()
-    print(f"  {C.W}APT / Financial Sector Indicators:{C.RS}")
-    print(f"  • LDAP queries for adminCount=1")
-    print(f"  • Shadow copy enumeration via vssadmin")
-    print(f"  • Credential store access (browser DBs)")
-    print(f"  • Lateral movement recon (RDP history, SMB shares)")
-    print(f"  • WMI subscription queries")
-    print(f"  • Service binary path enumeration")
-    print(f"  • LOLBAS abuse: certutil -encode, bitsadmin, forfiles")
+
+    # ── Blue team indicators ──────────────────────────────────────────────
+    print(f"  {C.W}── Blue Team Indicators to Validate ──{C.RS}")
+    print(f"  • Sysmon 10 (ProcessAccess on lsass.exe) — DT-001")
+    print(f"  • Sysmon 17 (PipeCreated — MSSE / postex pattern) — DT-002")
+    print(f"  • Security 4104 (Script Block — EncodedCommand) — DT-003")
+    print(f"  • Security 4657 (Registry Run key modified) — DT-004")
+    print(f"  • Security 4698/4699 (Scheduled Task created/deleted) — DT-005")
+    print(f"  • wevtutil cl Security in process creation logs — DT-006")
+    print(f"  • Sysmon 22 (DNS query — DGA/beacon-pattern FQDN) — DT-007")
+    print(f"  • Sysmon 1 (whoami /priv /groups) — DT-008")
+    print(f"  • Process Creation 4688 (LOLBAS binaries) — Phases 1-10")
+    print(f"  • Registry Access 4657 — Phases 5-9")
     print()
 
     log.finalize(exe.total, exe.ok, exe.fail, exe.skip)
 
+    # ── Text log: summary ─────────────────────────────────────────────────
     log.write(0, "")
-    log.write(0, f"══════════════════════════════════════════════════════════════════")
-    log.write(0, f"EXECUTION SUMMARY")
-    log.write(0, f"══════════════════════════════════════════════════════════════════")
+    log.write(0, "══════════════════════════════════════════════════════════════════")
+    log.write(0, "EXECUTION SUMMARY")
+    log.write(0, "══════════════════════════════════════════════════════════════════")
     log.write(0, f"Completed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}")
     log.write(0, f"Duration: {m}m {s}s")
-    log.write(0, f"Actions: {exe.total} total | {exe.ok} success | {exe.fail} failed | {exe.skip} skipped")
-    if exe.total > 0:
-        log.write(0, f"Success Rate: {sr:.1f}%")
-    log.write(0, f"Findings: {len(log.findings)} total")
-    for sev, c in sev_counts.items():
-        log.write(0, f"  [{sev}]: {c}")
+    log.write(0, f"Total Actions : {exe.total}")
+    log.write(0, f"Detected / Completed : {exe.ok}")
+    log.write(0, f"Blocked / Failed     : {exe.fail}")
+    log.write(0, f"Skipped              : {exe.skip}")
+    if dt_total > 0:
+        log.write(0, "")
+        log.write(0, "── Phase 12 Detection Effectiveness ──")
+        log.write(0, f"  TTPs Executed (gaps)   : {len(dt_executed)}/{dt_total}")
+        log.write(0, f"  TTPs Blocked           : {len(dt_blocked)}/{dt_total}")
+        if detect_rate is not None:
+            log.write(0, f"  Detection / Block Rate : {detect_rate:.1f}%")
+        for r in dt_executed:
+            log.write(0, f"  [GAP]     {r.test_id} {r.test_name} — {r.detail}")
+        for r in dt_blocked:
+            log.write(0, f"  [BLOCKED] {r.test_id} {r.test_name} — {r.detail}")
+    log.write(0, "")
+    log.write(0, f"── Findings ({len(log.findings)}) ──")
+    for f in log.findings:
+        log.write(0, f"  [{f.severity}] {f.message}")
+    log.write(0, "")
+    log.write(0, f"Output Files:")
+    log.write(0, f"  Text:    {log.txt}")
+    log.write(0, f"  JSON:    {log.json}")
+    log.write(0, f"  HTML:    {log.html}")
+    log.write(0, "══════════════════════════════════════════════════════════════════")
+    sev_counts = sev_counts  # already populated above
     log.write(0, f"Output Files:")
     log.write(0, f"  Text:    {log.txt}")
     log.write(0, f"  JSON:    {log.json}")
