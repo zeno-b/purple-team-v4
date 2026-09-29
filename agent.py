@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
     python agent.py --report-only   # Re-generate HTML from last JSON log
@@ -421,6 +420,7 @@ class Logger:
         self.events: List[Dict] = []
         self.findings: List[Finding] = []
         self.detection_results: List[DetectionResult] = []
+        self.defender_alerts: int = 0   # Defender EventID 1116/1117 during exercise window
         self.start = time.time()
         self.phase = ""
         self.phase_start = 0.0
@@ -464,11 +464,14 @@ class Logger:
                 "end": datetime.now(timezone.utc).isoformat(),
                 "duration": int(time.time() - self.start),
             },
-            "summary": {"total": total, "success": success, "failed": failed, "skipped": skipped},
+            "summary": {"total": total, "success": success, "failed": failed, "skipped": skipped,
+                        "defender_alerts": self.defender_alerts},
             "findings": [
                 {"severity": f.severity, "technique": f.technique, "message": f.message,
                  "remediation": f.remediation, "detection": f.detection}
-                for f in self.findings
+                for f in sorted(self.findings,
+                                key=lambda x: ["CRITICAL","HIGH","MEDIUM","LOW","INFO"].index(x.severity)
+                                              if x.severity in ["CRITICAL","HIGH","MEDIUM","LOW","INFO"] else 9)
             ],
             "events": self.events,
             "detection_results": [
@@ -1059,7 +1062,6 @@ def phase_defense() -> None:
 
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
-
 
     end_phase()
 
@@ -1979,6 +1981,26 @@ def phase_detection_validation() -> None:
 
         time.sleep(0.3)
 
+    # Query Defender events (1116=detected, 1117=action taken) during the exercise window
+    _act("Querying Windows Defender alerts generated during exercise", "AV-TEST")
+    start_dt = datetime.fromtimestamp(log.start).strftime("%Y-%m-%dT%H:%M:%S")
+    r_def = exe.ps(
+        f"try {{"
+        f"$s=[datetime]'{start_dt}';"
+        f"$ev=Get-WinEvent -LogName 'Microsoft-Windows-Windows Defender/Operational'"
+        f" -ErrorAction SilentlyContinue |"
+        f" Where-Object {{$_.Id -in @(1116,1117) -and $_.TimeCreated -ge $s}};"
+        f"if($ev){{Write-Output ($ev | Measure-Object).Count}}"
+        f"else{{Write-Output 0}}"
+        f"}} catch {{ Write-Output 0 }}",
+        "AV-TEST", "Defender alert count (EventID 1116/1117)")
+    if r_def.success:
+        try:
+            log.defender_alerts = int(r_def.stdout.strip().splitlines()[0].strip())
+        except Exception:
+            log.defender_alerts = 0
+    _ok(f"Defender raised {log.defender_alerts} alert(s) during the exercise window", "AV-TEST")
+
     _print_detection_report(log.detection_results, log)
     end_phase()
 
@@ -2006,8 +2028,9 @@ def generate_html_report() -> None:
     sev_rule_colors = {"CRITICAL": "#dc2626", "HIGH": "#ea580c", "MEDIUM": "#ca8a04", "LOW": "#0891b2"}
 
     # ── Findings ──────────────────────────────────────────────────────────────
+    _sev_html_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
     findings_html = ""
-    for f in log.findings:
+    for f in sorted(log.findings, key=lambda x: _sev_html_order.get(x.severity, 9)):
         col = severity_colors.get(f.severity, "#6b7280")
         rem = html.escape(f.remediation) if f.remediation else "N/A"
         det = html.escape(f.detection)   if f.detection   else "N/A"
@@ -2363,7 +2386,16 @@ def generate_summary(gen_report: bool = False) -> None:
     dt_exec  = [r for r in log.detection_results if r.outcome == "EXECUTED"]
     dt_blk   = [r for r in log.detection_results if r.outcome == "BLOCKED"]
     dt_total = len(dt_exec) + len(dt_blk)
-    det_rate = (len(dt_blk) / dt_total * 100) if dt_total else None
+
+    # Detection rate = (controls blocked + Defender alerted) / all TTPs
+    # Defender count capped at the number that actually executed (can't alert on more)
+    def_alerted  = min(log.defender_alerts, len(dt_exec))
+    true_gaps    = len(dt_exec) - def_alerted
+    det_rate     = ((len(dt_blk) + def_alerted) / dt_total * 100) if dt_total else None
+
+    # Severity sort order for findings display
+    _SEV = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+    sorted_findings = sorted(log.findings, key=lambda f: _SEV.get(f.severity, 9))
 
     ok_pct   = (exe.ok   / exe.total * 100) if exe.total else 0.0
     fail_pct = (exe.fail / exe.total * 100) if exe.total else 0.0
@@ -2465,7 +2497,7 @@ def generate_summary(gen_report: bool = False) -> None:
             glph = "└─" if not cmd_errs else "├─"
             print(sub_metric(glph, "Timeout / binary not found — environment issue",     exe.timeouts, exe.fail, nc=C.Y))
         if cmd_errs:
-            print(sub_metric("└─", "Command error / bad args — e.g. wrong key format",  cmd_errs,    exe.fail, nc=C.D))
+            print(sub_metric("└─", "No output / target not present or out of scope",     cmd_errs,    exe.fail, nc=C.D))
     if exe.skip:
         print(metric("Skipped",      str(exe.skip),  skip_pct, nc=C.Y, bc=C.Y))
     print(blank())
@@ -2482,30 +2514,38 @@ def generate_summary(gen_report: bool = False) -> None:
         print(div())
         print(metric("Executed — not blocked",
                      f"{len(dt_exec)}/{dt_total}", ex_pct, nc=C.R, bc=C.R))
+        if dt_exec:
+            # Defender alert sub-rows under "Executed"
+            if def_alerted:
+                glph = "└─" if not true_gaps else "├─"
+                print(sub_metric(glph, "Defender alerted (EventID 1116/1117)",
+                                 def_alerted, len(dt_exec), nc=C.Y))
+            if true_gaps:
+                print(sub_metric("└─", "Undetected — no alert raised, true gap",
+                                 true_gaps, len(dt_exec), nc=C.R))
         print(metric("Blocked by controls",
                      f"{len(dt_blk)}/{dt_total}",  bl_pct, nc=C.G, bc=C.G))
 
-        # Detection rate — pct + verdict badge, fills same width as count+bar+pct above
+        # Detection rate now reflects blocked + Defender-alerted
         badge    = f"[{rating}]"
-        pct_pad  = NW + 2 + BAR + 2 + PW - len(badge) - 2   # "  " separator before badge
+        pct_pad  = NW + 2 + BAR + 2 + PW - len(badge) - 2
         rate_inner = (f"  {rc}{'Detection / Block Rate':<{LW}}{C.RS}"
                       f"  {rc}{dr_str:>{pct_pad}}{C.RS}"
                       f"  {rc}{badge}{C.RS}")
         print(box(rate_inner))
         print(blank())
 
-    # Findings
+    # Findings — sorted CRITICAL → HIGH → MEDIUM → LOW → INFO
     print(div(heavy=True))
-    print(section(f"FINDINGS  ({len(log.findings)})"))
+    print(section(f"FINDINGS  ({len(sorted_findings)})"))
     print(blank())
-    if log.findings:
-        for f in log.findings:
-            col  = sev_col.get(f.severity, C.W)
-            sev  = f"[{f.severity}]"
-            # Shorten message to fit: IW - 2 indent - sev(10) - space
+    if sorted_findings:
+        for f in sorted_findings:
+            col     = sev_col.get(f.severity, C.W)
+            sev_tag = f"[{f.severity}]"
             max_msg = IW - 2 - 10 - 1
             msg     = f.message[:max_msg]
-            inner   = f"  {col}{sev:<10}{C.RS}{msg}"
+            inner   = f"  {col}{sev_tag:<10}{C.RS}{msg}"
             print(box(inner))
     else:
         print(box(f"  {C.D}No findings recorded.{C.RS}"))
@@ -2543,19 +2583,24 @@ def generate_summary(gen_report: bool = False) -> None:
         if exe.timeouts:
             log.write(0, f"    {'├─ Timeout / binary not found':<{L-4}} {exe.timeouts} ({exe.timeouts/exe.fail*100:.1f}% of failed)  environment or config issue")
         if cmd_errs:
-            log.write(0, f"    {'└─ Command error / bad arguments':<{L-4}} {cmd_errs} ({cmd_errs/exe.fail*100:.1f}% of failed)  e.g. wrong key, no output")
+            log.write(0, f"    {'└─ No output / target not present or out of scope':<{L-4}} {cmd_errs} ({cmd_errs/exe.fail*100:.1f}% of failed)")
     if exe.skip:
         log.write(0, f"  {'Skipped':<{L}} {exe.skip} ({skip_pct:.1f}%)")
     if dt_total > 0:
         log.write(0, "")
         log.write(0, f"  DETECTION VALIDATION  ({dt_total} TTPs tested)")
         log.write(0, f"  {'Executed — not blocked':<{L}} {len(dt_exec)}/{dt_total} ({len(dt_exec)/dt_total*100:.1f}%)")
+        if def_alerted:
+            log.write(0, f"    {'├─ Defender alerted (1116/1117)':<{L-4}} {def_alerted} ({def_alerted/len(dt_exec)*100:.1f}% of executed)")
+        if true_gaps:
+            log.write(0, f"    {'└─ Undetected — no alert, true gap':<{L-4}} {true_gaps} ({true_gaps/len(dt_exec)*100:.1f}% of executed)")
         log.write(0, f"  {'Blocked by controls':<{L}} {len(dt_blk)}/{dt_total}  ({len(dt_blk)/dt_total*100:.1f}%)")
         if det_rate is not None:
             log.write(0, f"  {'Detection / Block Rate':<{L}} {det_rate:.1f}%  [{_rating(det_rate)}]")
+            log.write(0, f"    Rate = (blocked {len(dt_blk)} + Defender alerted {def_alerted}) / {dt_total} TTPs")
     log.write(0, "")
-    log.write(0, f"  FINDINGS ({len(log.findings)})")
-    for f in log.findings:
+    log.write(0, f"  FINDINGS ({len(sorted_findings)})  — sorted by severity")
+    for f in sorted_findings:
         log.write(0, f"  [{f.severity:<8}]  {f.message}")
     log.write(0, "")
     log.write(0, f"  Text: {log.txt}")
