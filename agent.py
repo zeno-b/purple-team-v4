@@ -860,19 +860,6 @@ def phase_defense() -> None:
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
 
-    # Check for common AMSI bypass artifacts in PS history
-    r = exe.ps("Get-ChildItem 'C:\\\\Users\\\\*\\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\PowerShell\\\\PSReadLine\\\\ConsoleHost_history.txt' "
-               "-ErrorAction SilentlyContinue | ForEach-Object { "
-               "Get-Content $_.FullName -ErrorAction SilentlyContinue | "
-               "Select-String -Pattern 'amsiInitFailed|AmsiScanBuffer|System.Management.Automation.AmsiUtils' -SimpleMatch }",
-               "T1562.001", "AMSI bypass artifacts in PS history")
-    if r.success and r.stdout.strip():
-        log.add_finding(Finding(
-            "CRITICAL", "T1562.001", "AMSI bypass artifacts found in PowerShell history",
-            remediation="Investigate historical sessions; enforce script signing",
-            detection="Event ID 4104 (Script Block Logging) with AMSI bypass strings"))
-        _find("CRITICAL", "AMSI bypass artifacts in PowerShell history!")
-
     end_phase()
 
 
