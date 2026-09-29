@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
 """
+Purple Team Agent v5.0 — Advanced Windows LOLBAS Edition
+===========================================================
+Native Windows purple-team framework using Living Off The Land Binaries
+and Scripts (LOLBAS) for adversary simulation. No external dependencies
+beyond Python stdlib + optional cryptography for Phase 10.
+
+Features:
+  • 12 reconnaissance phases mapped to MITRE ATT&CK
+  • Dedicated LOLBAS abuse demonstration phase
+  • Concurrent execution engine for speed
+  • HTML + JSON + text reporting
+  • Risk-scored findings with remediation hints
+  • Reversible ransomware simulation
+  • EICAR AV detection test
+  • WMI / scheduled-task persistence simulation
+  • Lateral movement reconnaissance
+
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
     python agent.py --report-only   # Re-generate HTML from last JSON log
@@ -39,7 +56,7 @@ RANSOM_KEY = "PurpleTeam_Decrypt_Key_2024!"
 RANSOM_EXT = ".locked"
 RANSOM_MANIFEST = RANSOM_SIM_DIR / ".manifest"
 
-
+EICAR = r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
 
 # ───────────────────────────────────────────────────────────────────────────
 # LOLBAS CATALOGUE
@@ -1050,7 +1067,6 @@ def phase_defense() -> None:
 
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
-
 
     end_phase()
 
@@ -2315,58 +2331,49 @@ def generate_summary(gen_report: bool = False) -> None:
     dur = int(time.time() - log.start)
     m, s = dur // 60, dur % 60
 
-    # ── Detection metrics from phase 12 ──────────────────────────────────
+    # ── Pre-compute all metrics ───────────────────────────────────────────
     dt_executed = [r for r in log.detection_results if r.outcome == "EXECUTED"]
     dt_blocked  = [r for r in log.detection_results if r.outcome == "BLOCKED"]
     dt_total    = len(dt_executed) + len(dt_blocked)
-    # Detection/block rate: TTPs the blue team's controls stopped vs. all TTPs tested
     detect_rate = (len(dt_blocked) / dt_total * 100) if dt_total > 0 else None
 
-    # ── Findings grouped by severity ──────────────────────────────────────
-    sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
-    sev_col   = {"CRITICAL": C.R, "HIGH": C.R, "MEDIUM": C.Y, "LOW": C.CYN, "INFO": C.D}
+    ok_pct   = (exe.ok   / exe.total * 100) if exe.total else 0
+    fail_pct = (exe.fail / exe.total * 100) if exe.total else 0
+    skip_pct = (exe.skip / exe.total * 100) if exe.total else 0
+
+    sev_col: Dict[str, str] = {"CRITICAL": C.R, "HIGH": C.R, "MEDIUM": C.Y, "LOW": C.CYN, "INFO": C.D}
     sev_counts: Dict[str, int] = {}
     for f in log.findings:
         sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
 
-    # ── Terminal output ───────────────────────────────────────────────────
+    rate_col = (C.G if detect_rate and detect_rate >= 75
+                else C.Y if detect_rate and detect_rate >= 50
+                else C.R)
+
+    W = 34  # label column width
+
+    # ── Terminal: single consolidated block ──────────────────────────────
     print()
     print(f"{C.CYN}╔═══════════════════════════════════════════════════════════════════════╗{C.RS}")
     print(f"{C.CYN}║{C.RS} {C.W}EXECUTION SUMMARY{C.RS}                                     {C.CYN}║{C.RS}")
     print(f"{C.CYN}╚═══════════════════════════════════════════════════════════════════════╝{C.RS}")
     print()
-    print(f"  {'Duration:':<26} {m}m {s}s")
-    print(f"  {'Total Actions:':<26} {exe.total}")
-    print(f"  {C.G}{'Detected / Completed:':<26}{C.RS} {exe.ok}")
-    print(f"  {C.R}{'Blocked / Failed:':<26}{C.RS} {exe.fail}")
-    print(f"  {C.Y}{'Skipped:':<26}{C.RS} {exe.skip}")
-    print()
-
-    # ── Security detection metrics ────────────────────────────────────────
+    print(f"  {'Completed:':<{W}} {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    print(f"  {'Duration:':<{W}} {m}m {s}s")
+    print(f"  {'Total Actions:':<{W}} {exe.total}")
+    print(f"  {C.G}{'Detected / Completed:':<{W}}{C.RS} {exe.ok:<6} ({ok_pct:.1f}%)")
+    print(f"  {C.R}{'Blocked / Failed:':<{W}}{C.RS} {exe.fail:<6} ({fail_pct:.1f}%)")
+    if exe.skip:
+        print(f"  {C.Y}{'Skipped:':<{W}}{C.RS} {exe.skip:<6} ({skip_pct:.1f}%)")
     if dt_total > 0:
-        print(f"  {C.W}── Phase 12 — Detection Effectiveness ──{C.RS}")
         ex_col = C.R if dt_executed else C.G
         bl_col = C.G if dt_blocked  else C.Y
-        print(f"  {ex_col}{'TTPs Executed (not blocked):':<26}{C.RS} {len(dt_executed)}/{dt_total}"
-              f"  ← {C.R}detection gaps{C.RS}")
-        print(f"  {bl_col}{'TTPs Blocked by controls:':<26}{C.RS} {len(dt_blocked)}/{dt_total}"
-              f"  ← {C.G}controls working{C.RS}")
-        rate_col = C.G if detect_rate and detect_rate >= 75 else C.Y if detect_rate and detect_rate >= 50 else C.R
-        print(f"  {rate_col}{'Detection / Block Rate:':<26}{C.RS} {detect_rate:.1f}%")
-        print()
-        if dt_executed:
-            print(f"  {C.R}TTPs that ran undetected (blue team gaps):{C.RS}")
-            for r in dt_executed:
-                print(f"    {C.R}✗{C.RS} {r.test_id} {r.test_name} [{r.technique}]")
-                print(f"      {C.D}{r.detail}{C.RS}")
-        if dt_blocked:
-            print(f"  {C.G}TTPs blocked by security controls:{C.RS}")
-            for r in dt_blocked:
-                print(f"    {C.G}✓{C.RS} {r.test_id} {r.test_name} [{r.technique}]")
-                print(f"      {C.D}{r.detail}{C.RS}")
-        print()
+        print(f"  {ex_col}{'TTPs Executed (detection gaps):':<{W}}{C.RS} {len(dt_executed)}/{dt_total:<4} ({len(dt_executed)/dt_total*100:.1f}%)")
+        print(f"  {bl_col}{'TTPs Blocked by controls:':<{W}}{C.RS} {len(dt_blocked)}/{dt_total:<4} ({len(dt_blocked)/dt_total*100:.1f}%)")
+        print(f"  {rate_col}{'Detection / Block Rate:':<{W}}{C.RS} {detect_rate:.1f}%")
+    print()
 
-    # ── Findings list ─────────────────────────────────────────────────────
+    # ── Findings ──────────────────────────────────────────────────────────
     print(f"  {C.W}── Findings ({len(log.findings)}) ──{C.RS}")
     if log.findings:
         for f in log.findings:
@@ -2378,65 +2385,41 @@ def generate_summary(gen_report: bool = False) -> None:
 
     # ── Output files ──────────────────────────────────────────────────────
     print(f"  {C.W}── Output Files ──{C.RS}")
-    print(f"  Text Log:    {log.txt}")
-    print(f"  JSON Log:    {log.json}")
-    print(f"  HTML Report: {log.html}")
-    print()
-
-    # ── Blue team indicators ──────────────────────────────────────────────
-    print(f"  {C.W}── Blue Team Indicators to Validate ──{C.RS}")
-    print(f"  • Sysmon 10 (ProcessAccess on lsass.exe) — DT-001")
-    print(f"  • Sysmon 17 (PipeCreated — MSSE / postex pattern) — DT-002")
-    print(f"  • Security 4104 (Script Block — EncodedCommand) — DT-003")
-    print(f"  • Security 4657 (Registry Run key modified) — DT-004")
-    print(f"  • Security 4698/4699 (Scheduled Task created/deleted) — DT-005")
-    print(f"  • wevtutil cl Security in process creation logs — DT-006")
-    print(f"  • Sysmon 22 (DNS query — DGA/beacon-pattern FQDN) — DT-007")
-    print(f"  • Sysmon 1 (whoami /priv /groups) — DT-008")
-    print(f"  • Process Creation 4688 (LOLBAS binaries) — Phases 1-10")
-    print(f"  • Registry Access 4657 — Phases 5-9")
+    print(f"  Text:    {log.txt}")
+    print(f"  JSON:    {log.json}")
+    print(f"  HTML:    {log.html}")
     print()
 
     log.finalize(exe.total, exe.ok, exe.fail, exe.skip)
 
-    # ── Text log: summary ─────────────────────────────────────────────────
+    # ── Text log: same consolidated block ────────────────────────────────
+    L = 34
     log.write(0, "")
     log.write(0, "══════════════════════════════════════════════════════════════════")
     log.write(0, "EXECUTION SUMMARY")
     log.write(0, "══════════════════════════════════════════════════════════════════")
-    log.write(0, f"Completed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}")
-    log.write(0, f"Duration: {m}m {s}s")
-    log.write(0, f"Total Actions : {exe.total}")
-    log.write(0, f"Detected / Completed : {exe.ok}")
-    log.write(0, f"Blocked / Failed     : {exe.fail}")
-    log.write(0, f"Skipped              : {exe.skip}")
+    log.write(0, f"  {'Completed:':<{L}} {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}")
+    log.write(0, f"  {'Duration:':<{L}} {m}m {s}s")
+    log.write(0, f"  {'Total Actions:':<{L}} {exe.total}")
+    log.write(0, f"  {'Detected / Completed:':<{L}} {exe.ok} ({ok_pct:.1f}%)")
+    log.write(0, f"  {'Blocked / Failed:':<{L}} {exe.fail} ({fail_pct:.1f}%)")
+    if exe.skip:
+        log.write(0, f"  {'Skipped:':<{L}} {exe.skip} ({skip_pct:.1f}%)")
     if dt_total > 0:
-        log.write(0, "")
-        log.write(0, "── Phase 12 Detection Effectiveness ──")
-        log.write(0, f"  TTPs Executed (gaps)   : {len(dt_executed)}/{dt_total}")
-        log.write(0, f"  TTPs Blocked           : {len(dt_blocked)}/{dt_total}")
+        log.write(0, f"  {'TTPs Executed (gaps):':<{L}} {len(dt_executed)}/{dt_total} ({len(dt_executed)/dt_total*100:.1f}%)")
+        log.write(0, f"  {'TTPs Blocked by controls:':<{L}} {len(dt_blocked)}/{dt_total} ({len(dt_blocked)/dt_total*100:.1f}%)")
         if detect_rate is not None:
-            log.write(0, f"  Detection / Block Rate : {detect_rate:.1f}%")
-        for r in dt_executed:
-            log.write(0, f"  [GAP]     {r.test_id} {r.test_name} — {r.detail}")
-        for r in dt_blocked:
-            log.write(0, f"  [BLOCKED] {r.test_id} {r.test_name} — {r.detail}")
+            log.write(0, f"  {'Detection / Block Rate:':<{L}} {detect_rate:.1f}%")
     log.write(0, "")
     log.write(0, f"── Findings ({len(log.findings)}) ──")
     for f in log.findings:
         log.write(0, f"  [{f.severity}] {f.message}")
     log.write(0, "")
-    log.write(0, f"Output Files:")
+    log.write(0, "Output Files:")
     log.write(0, f"  Text:    {log.txt}")
     log.write(0, f"  JSON:    {log.json}")
     log.write(0, f"  HTML:    {log.html}")
     log.write(0, "══════════════════════════════════════════════════════════════════")
-    sev_counts = sev_counts  # already populated above
-    log.write(0, f"Output Files:")
-    log.write(0, f"  Text:    {log.txt}")
-    log.write(0, f"  JSON:    {log.json}")
-    log.write(0, f"  HTML:    {log.html}")
-    log.write(0, f"══════════════════════════════════════════════════════════════════")
 
     if gen_report:
         generate_html_report()
