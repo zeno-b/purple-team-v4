@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """
-
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
     python agent.py --report-only   # Re-generate HTML from last JSON log
@@ -1063,7 +1062,7 @@ def phase_defense() -> None:
 
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
-    
+
     end_phase()
 
 
@@ -2477,7 +2476,7 @@ def generate_summary(gen_report: bool = False) -> None:
         return n / T * 100 if T else 0.0
 
     print(section("ALL ACTIONS", f"{C.D}{T} actions — each row as % of {T}"))
-    print(bx(f"  {C.D}{'CATEGORY':<{LW}}  {'COUNT':>{NW}}  {'DISTRIBUTION':<{BAR}}  {'RATE':>{PW}}{C.RS}"))
+    print(box(f"  {C.D}{'CATEGORY':<{LW}}  {'COUNT':>{NW}}  {'DISTRIBUTION':<{BAR}}  {'RATE':>{PW}}{C.RS}"))
     print(div())
 
     # Positive outcomes
@@ -2521,7 +2520,7 @@ def generate_summary(gen_report: bool = False) -> None:
         dr_str  = f"{det_rate:.1f}%" if det_rate is not None else "N/A"
 
         print(section("DETECTION VALIDATION", f"{C.W}{dt_total} TTPs — each row % of {dt_total}"))
-        print(bx(f"  {C.D}{'CATEGORY':<{LW}}  {'COUNT':>{NW}}  {'DISTRIBUTION':<{BAR}}  {'RATE':>{PW}}{C.RS}"))
+        print(box(f"  {C.D}{'CATEGORY':<{LW}}  {'COUNT':>{NW}}  {'DISTRIBUTION':<{BAR}}  {'RATE':>{PW}}{C.RS}"))
         print(div())
         if dt_blk_n:
             print(metric("Blocked by security control",           f"{dt_blk_n}/{dt_total}",  bl_pct,  nc=C.G, bc=C.G))
