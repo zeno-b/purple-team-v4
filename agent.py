@@ -245,7 +245,7 @@ class Logger:
             f.write(f"║ PURPLE TEAM AGENT v{SCRIPT_VERSION} — EXECUTION LOG ║\n")
             f.write("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
             f.write(f" Run ID:       {self.run_id}\n")
-            f.write(f" Start Time:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}\n")
+            f.write(f" Start Time:   {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}\n")
             f.write(f" Operator:     {os.getlogin() if hasattr(os, 'getlogin') else os.environ.get('USERNAME', 'unknown')}\n")
             f.write(f" Hostname:     {os.environ.get('COMPUTERNAME', 'unknown')}\n")
             f.write(f" PID:          {os.getpid()}\n")
@@ -414,7 +414,7 @@ def begin_phase(number: str, title: str, techniques: str, description: str) -> N
     log.phase = f"Phase {number}"
     log.phase_start = time.time()
     log.phase_findings = []
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     el = _elapsed(log.start)
     print()
     print(f"{C.CYN}╔══════════════════════════════════════════════════════════════════════╗{C.RS}")
@@ -435,7 +435,7 @@ def begin_phase(number: str, title: str, techniques: str, description: str) -> N
 
 def end_phase() -> None:
     dur = int(time.time() - log.phase_start)
-    end = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    end = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     if log.phase_findings:
         print()
         print(f"  {C.W}── Findings ({len(log.phase_findings)}) ──{C.RS}")
@@ -544,17 +544,19 @@ def phase_system() -> None:
         _find("CRITICAL", "Defender real-time protection is DISABLED")
 
     # AV products via SecurityCenter2
-    exe.wmic(
-        "/NAMESPACE:\\\\root\\\\SecurityCenter2 PATH AntiVirusProduct GET displayName,productState,pathToSignedProductExe /format:list",
-        "T1518.001", "Registered AV products via WMIC")
+    exe.run("wmic", ["/NAMESPACE:\\\\root\\\\SecurityCenter2", "PATH",
+                     "AntiVirusProduct", "GET",
+                     "displayName,productState,pathToSignedProductExe",
+                     "/format:list"],
+             "T1518.001", "Registered AV products via WMIC")
 
     # Locale & UAC
-    exe.reg("query", r"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\Language", "T1614.001", "System locale")
-    exe.reg("query", r"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System", "T1082",
+    exe.reg("query", r"HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language", "T1614.001", "System locale")
+    exe.reg("query", r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "T1082",
             "UAC configuration", "EnableLUA")
 
     # .NET & PS versions
-    exe.reg("query", r"HKLM\\SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full", "T1082", ".NET version")
+    exe.reg("query", r"HKLM\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full", "T1082", ".NET version")
     exe.ps("$PSVersionTable | Format-List", "T1082", "PowerShell version")
 
     # BitLocker
@@ -756,10 +758,10 @@ def phase_creds() -> None:
     exe.cmd('tasklist /fi "imagename eq lsass.exe" /v', "T1003.001", "LSASS details")
 
     # SAM permissions
-    exe.run("icacls", [r"C:\\\\Windows\\\\System32\\\\config\\\\SAM"], "T1003.002", "SAM hive ACLs")
+    exe.run("icacls", [r"C:\Windows\System32\config\SAM"], "T1003.002", "SAM hive ACLs")
 
     # Cached credentials
-    exe.reg("query", r"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon", "T1003.005",
+    exe.reg("query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon", "T1003.005",
             "Cached logon credentials")
 
     # Cloud creds
@@ -795,11 +797,11 @@ def phase_defense() -> None:
                 "Map security controls, logging config, AMSI, AppLocker, firewall rules")
 
     # PowerShell logging
-    exe.reg("query", r"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell\\ScriptBlockLogging",
+    exe.reg("query", r"HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging",
             "T1562.001", "PS ScriptBlockLogging")
-    exe.reg("query", r"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell\\ModuleLogging",
+    exe.reg("query", r"HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ModuleLogging",
             "T1562.001", "PS ModuleLogging")
-    exe.reg("query", r"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\PowerShell\\Transcription",
+    exe.reg("query", r"HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription",
             "T1562.001", "PS Transcription")
 
     # Sysmon
@@ -816,7 +818,7 @@ def phase_defense() -> None:
            "T1562.001", "AppLocker policy")
 
     # AMSI
-    exe.reg("query", r"HKLM\\SOFTWARE\\Microsoft\\AMSI\\Providers", "T1562.001", "AMSI providers")
+    exe.reg("query", r"HKLM\SOFTWARE\Microsoft\AMSI\Providers", "T1562.001", "AMSI providers")
 
     # Event logs
     exe.run("wevtutil", ["el"], "T1562.002", "Event log list")
@@ -843,7 +845,7 @@ def phase_defense() -> None:
         _find("MEDIUM", "Full Language Mode — no PS execution restrictions")
 
     # LSA protection
-    exe.reg("query", r"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Lsa", "T1003", "LSA protection")
+    exe.reg("query", r"HKLM\SYSTEM\CurrentControlSet\Control\Lsa", "T1003", "LSA protection")
 
     # Credential Guard
     exe.ps("Get-CimInstance -ClassName Win32_DeviceGuard -Namespace 'root\\\\Microsoft\\\\Windows\\\\DeviceGuard' "
@@ -852,7 +854,7 @@ def phase_defense() -> None:
 
     # WEF
     exe.reg("query",
-            r"HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\EventLog\\EventForwarding\\SubscriptionManager",
+            r"HKLM\SOFTWARE\Policies\Microsoft\Windows\EventLog\EventForwarding\SubscriptionManager",
             "T1562.002", "Windows Event Forwarding")
 
     # ETW
@@ -893,7 +895,7 @@ def phase_network() -> None:
     exe.run("ipconfig", ["/displaydns"], "T1018", "DNS cache")
     exe.run("route", ["print"], "T1016", "Routing table")
     exe.run("nltest", ["/domain_trusts"], "T1482", "Domain trusts")
-    exe.reg("query", r"HKCU\\Software\\Microsoft\\Terminal Server Client\\Servers", "T1018", "RDP history")
+    exe.reg("query", r"HKCU\Software\Microsoft\Terminal Server Client\Servers", "T1018", "RDP history")
     exe.run("netsh", ["interface", "portproxy", "show", "all"], "T1090", "Port proxy rules")
     exe.ps("Get-VpnConnection -ErrorAction SilentlyContinue | "
            "Select-Object Name,ServerAddress,ConnectionStatus,TunnelType | Format-Table", "T1133", "VPN connections")
@@ -975,10 +977,10 @@ def phase_persistence() -> None:
                 "Map all persistence vectors: startup, tasks, services, WMI, COM, DLL hijack")
 
     # Registry Run keys
-    exe.reg("query", r"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "T1547.001", "HKLM Run")
-    exe.reg("query", r"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce", "T1547.001", "HKLM RunOnce")
-    exe.reg("query", r"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run", "T1547.001", "HKCU Run")
-    exe.reg("query", r"HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce", "T1547.001", "HKCU RunOnce")
+    exe.reg("query", r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "T1547.001", "HKLM Run")
+    exe.reg("query", r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "T1547.001", "HKLM RunOnce")
+    exe.reg("query", r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "T1547.001", "HKCU Run")
+    exe.reg("query", r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce", "T1547.001", "HKCU RunOnce")
 
     # Startup folders
     exe.cmd(r'dir "C:\\\\Users\\\\*\\\\AppData\\\\Roaming\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\Startup" /s /b 2>nul',
@@ -1006,13 +1008,13 @@ def phase_persistence() -> None:
            "T1546.003", "WMI event subscriptions")
 
     # COM hijack
-    exe.reg("query", r"HKCU\\Software\\Classes\\CLSID", "T1546.015", "COM registrations")
+    exe.reg("query", r"HKCU\Software\Classes\CLSID", "T1546.015", "COM registrations")
 
     # PATH hijack surface
     exe.cmd("echo %PATH%", "T1574.001", "PATH directories")
 
     # Boot execute
-    exe.reg("query", r"HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager", "T1547", "Boot execute", "BootExecute")
+    exe.reg("query", r"HKLM\SYSTEM\CurrentControlSet\Control\Session Manager", "T1547", "Boot execute", "BootExecute")
 
     # Check for existing WMI persistence (real detections)
     r = exe.ps("Get-WmiObject -Namespace root\\\\Subscription -Class __EventFilter -ErrorAction SilentlyContinue | Measure-Object",
@@ -1351,9 +1353,9 @@ def phase_impact() -> None:
     exe.run("vssadmin", ["list", "shadows"], "T1490", "VSS enumeration")
     exe.run("sc", ["query", "VSS"], "T1490", "VSS service")
     exe.cmd("wbadmin get versions 2>nul", "T1490", "Windows Backup versions")
-    exe.cmd('sc query type= service | findstr /i "backup vss wbengine sql exchange vmware veeam"',
+    exe.cmd('sc query type= service | findstr /i /c:"backup" /c:"vss" /c:"wbengine" /c:"sql" /c:"exchange" /c:"vmware" /c:"veeam"',
             "T1489", "Backup services")
-    exe.cmd('sc query type= service | findstr /i "MSSQL MySQL postgres oracle mongodb redis"',
+    exe.cmd('sc query type= service | findstr /i /c:"MSSQL" /c:"MySQL" /c:"postgres" /c:"oracle" /c:"mongodb" /c:"redis"',
             "T1489", "Database services")
 
     # Real target enumeration (read-only)
@@ -1444,7 +1446,7 @@ def phase_eicar() -> None:
     # Test 2: Public Documents
     exe.total += 1
     _act("EICAR in Public Documents...")
-    ew = Path(os.environ.get("PUBLIC", r"C:\\Users\\Public")) / "Documents" / "eicar_test.com"
+    ew = Path(os.environ.get("PUBLIC", r"C:\Users\Public")) / "Documents" / "eicar_test.com"
     ew.parent.mkdir(parents=True, exist_ok=True)
     try:
         ew.write_text(EICAR, encoding="ascii")
@@ -1591,7 +1593,7 @@ footer{{text-align:center;color:var(--muted);font-size:.8rem;margin-top:2rem;pad
 <div class="container">
 <header>
 <h1>🛡️ Purple Team Exercise Report</h1>
-<p>Version {html.escape(SCRIPT_VERSION)} | Run ID: {html.escape(log.run_id)} | {html.escape(datetime.now().strftime('%Y-%m-%d %H:%M:%S'))}</p>
+<p>Version {html.escape(SCRIPT_VERSION)} | Run ID: {html.escape(log.run_id)} | {html.escape(datetime.now().strftime('%d/%m/%Y %H:%M:%S'))}</p>
 </header>
 
 <div class="grid">
@@ -1818,7 +1820,7 @@ def generate_summary(gen_report: bool = False) -> None:
     log.write(0, f"══════════════════════════════════════════════════════════════════")
     log.write(0, f"EXECUTION SUMMARY")
     log.write(0, f"══════════════════════════════════════════════════════════════════")
-    log.write(0, f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    log.write(0, f"Completed: {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}")
     log.write(0, f"Duration: {m}m {s}s")
     log.write(0, f"Actions: {exe.total} total | {exe.ok} success | {exe.fail} failed | {exe.skip} skipped")
     if exe.total > 0:
