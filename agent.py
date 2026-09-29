@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
     python agent.py --report-only   # Re-generate HTML from last JSON log
@@ -31,6 +32,22 @@ from typing import Dict, List, Optional, Tuple
 # ───────────────────────────────────────────────────────────────────────────
 
 SCRIPT_VERSION = "5.0-Py"
+
+PHASE_NAMES: Dict[str, str] = {
+    "Phase 0":  "Env Detection",
+    "Phase 1":  "System Profiling",
+    "Phase 2":  "Account Discovery",
+    "Phase 3":  "Process & Services",
+    "Phase 4":  "File Discovery",
+    "Phase 5":  "Credential Recon",
+    "Phase 6":  "Defense Evasion",
+    "Phase 7":  "Network Recon",
+    "Phase 8":  "Collection",
+    "Phase 9":  "Persistence Recon",
+    "Phase 10": "LOLBAS Demo",
+    "Phase 11": "Impact Simulation",
+    "Phase 12": "Detection Valid.",
+}
 TIMEOUT_SECONDS = 25
 MAX_WORKERS = 4
 
@@ -493,13 +510,22 @@ log = Logger()
 
 class Executor:
     def __init__(self):
-        self.total    = 0
-        self.ok       = 0
-        self.fail     = 0
-        self.skip     = 0
-        self.denied   = 0   # access denied / permission errors (security control)
-        self.timeouts = 0   # timeout expired or binary not found
+        self.total      = 0
+        self.ok         = 0
+        self.fail       = 0
+        self.skip       = 0
+        self.denied     = 0   # access denied / permission errors (security control)
+        self.timeouts   = 0   # timeout expired or binary not found
+        self.phase_stats: Dict[str, Dict[str, int]] = {}
+        # phase_stats[phase_name] = {total, ok, fail, denied, timeouts}
         self._cache: Dict[str, str] = {}
+
+    def _ps(self) -> Dict[str, int]:
+        """Return (and initialise if needed) the stats dict for the current phase."""
+        return self.phase_stats.setdefault(
+            log.phase,
+            {"total": 0, "ok": 0, "fail": 0, "denied": 0, "timeouts": 0},
+        )
 
     def _resolve(self, name: str) -> str:
         if name in self._cache:
@@ -522,22 +548,55 @@ class Executor:
         return name
 
     def run(self, binary: str, args: List[str], technique: str, description: str,
-            shell: bool = False, capture: bool = True) -> ActionResult:
+            shell: bool = False, capture: bool = True,
+            background: bool = False) -> ActionResult:
+        """Execute a command.
+        background=True: launch with Popen, confirm start, kill immediately — for
+        GUI-spawning binaries (mshta, rundll32) so the script never blocks on a window.
+        """
         self.total += 1
+        self._ps()["total"] += 1
         _act(description, technique)
         cmd = [self._resolve(binary)] + args
         cmd_str = " ".join(cmd)
         log.write(4, f"[{_ts()}] [ACTION] {description} | {technique}")
         log.write(8, f"Command: {cmd_str}")
+
+        # ── Background (non-blocking) mode ──────────────────────────────────
+        if background:
+            try:
+                proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, shell=shell)
+                time.sleep(0.5)                     # let it start
+                still_running = proc.poll() is None
+                if still_running:
+                    proc.kill()                     # kill — do not wait for GUI close
+                self.ok += 1
+                self._ps()["ok"] += 1
+                detail = "launched and killed (non-blocking)" if still_running else "exited quickly"
+                _ok(f"{description} — {detail}", technique)
+                log.write(8, f"Status: SUCCESS | {detail}")
+                log.json_event("SUCCESS", technique, log.phase, description, detail, cmd_str)
+                return ActionResult(True, "", "", technique, description, cmd_str)
+            except Exception as exc:
+                self.fail += 1
+                self._ps()["fail"] += 1
+                _err(f"{description} — {exc}", technique)
+                log.write(8, f"Status: FAILED | {exc}")
+                log.json_event("FAILED", technique, log.phase, description, str(exc), cmd_str)
+                return ActionResult(False, "", str(exc), technique, description, cmd_str)
+
+        # ── Normal (blocking) mode ───────────────────────────────────────────
         try:
-            r = subprocess.run(cmd, capture_output=capture, text=True, timeout=TIMEOUT_SECONDS,
-                               shell=shell, errors="replace")
+            r = subprocess.run(cmd, capture_output=capture, text=True,
+                               timeout=TIMEOUT_SECONDS, shell=shell, errors="replace")
             out = r.stdout or ""
             err = r.stderr or ""
             if r.returncode == 0:
                 self.ok += 1
+                self._ps()["ok"] += 1
                 _ok(description, technique)
-                log.write(8, f"Status: SUCCESS")
+                log.write(8, "Status: SUCCESS")
                 for line in out.strip().split("\n")[:20]:
                     log.write(12, line)
                 lines = out.strip().split("\n")
@@ -550,11 +609,13 @@ class Executor:
                 return ActionResult(True, out, err, technique, description, cmd_str)
             else:
                 self.fail += 1
+                self._ps()["fail"] += 1
                 emsg = err.strip().split("\n")[0] if err.strip() else f"exit {r.returncode}"
                 _DENY = ("access denied", "access is denied", "permission denied",
                          "privilege", "error_access_denied", "cannot open", "cannot read")
                 if any(k in (err + out).lower() for k in _DENY) or r.returncode == 5:
                     self.denied += 1
+                    self._ps()["denied"] += 1
                 _err(f"{description} — {emsg}", technique)
                 log.write(8, f"Status: FAILED | {emsg}")
                 log.json_event("FAILED", technique, log.phase, description, emsg, cmd_str)
@@ -562,17 +623,24 @@ class Executor:
         except subprocess.TimeoutExpired:
             self.fail += 1
             self.timeouts += 1
+            self._ps()["fail"] += 1
+            self._ps()["timeouts"] += 1
             _err(f"{description} — Timeout ({TIMEOUT_SECONDS}s)", technique)
             log.json_event("TIMEOUT", technique, log.phase, description, "Timeout", cmd_str)
             return ActionResult(False, "", "Timeout", technique, description, cmd_str)
         except FileNotFoundError:
             self.fail += 1
             self.timeouts += 1
+            self._ps()["fail"] += 1
+            self._ps()["timeouts"] += 1
             _err(f"{description} — Binary not found: {cmd[0]}", technique)
-            log.json_event("FAILED", technique, log.phase, description, f"Binary not found: {cmd[0]}", cmd_str)
-            return ActionResult(False, "", f"Binary not found: {cmd[0]}", technique, description, cmd_str)
+            log.json_event("FAILED", technique, log.phase, description,
+                           f"Binary not found: {cmd[0]}", cmd_str)
+            return ActionResult(False, "", f"Binary not found: {cmd[0]}", technique,
+                                description, cmd_str)
         except Exception as exc:
             self.fail += 1
+            self._ps()["fail"] += 1
             _err(f"{description} — {exc}", technique)
             log.json_event("FAILED", technique, log.phase, description, str(exc), cmd_str)
             return ActionResult(False, "", str(exc), technique, description, cmd_str)
@@ -1063,6 +1131,7 @@ def phase_defense() -> None:
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
 
+
     end_phase()
 
 
@@ -1326,7 +1395,7 @@ def phase_lolbas() -> None:
     _act("rundll32 execution demonstration (T1218.011)")
     # rundll32 can execute arbitrary DLL functions — simulate with a benign call
     r = exe.run("rundll32", ["shell32.dll,Control_RunDLL"], "T1218.011",
-                "rundll32 Control_RunDLL")
+                "rundll32 Control_RunDLL", background=True)
     if r.success:
         _ok("rundll32 executed DLL function", "T1218.011")
         log.add_finding(Finding(
@@ -1340,9 +1409,9 @@ def phase_lolbas() -> None:
     _act("mshta execution demonstration (T1218.005)")
     hta_file = demo_dir / "test.hta"
     hta_file.write_text('<script>alert("PURPLE TEAM SIMULATION");</script>', encoding="utf-8")
-    r = exe.run("mshta", [str(hta_file)], "T1218.005", "mshta execute HTA")
-    # mshta with alert() may hang, so we accept timeout as "functional"
-    if r.success or "Timeout" in r.stderr:
+    r = exe.run("mshta", [str(hta_file)], "T1218.005", "mshta execute HTA",
+                background=True)  # non-blocking: killed after confirming launch
+    if r.success:
         _ok("mshta execution functional (alert may require interaction)", "T1218.005")
         log.add_finding(Finding(
             "HIGH", "T1218.005", "mshta HTA execution functional",
@@ -2211,10 +2280,6 @@ footer{{text-align:center;color:var(--muted);font-size:.8rem;margin-top:2rem;pad
     with open(log.html, "w", encoding="utf-8") as f:
         f.write(html_content)
     _ok(f"HTML report generated: {log.html}")
-    try:
-        webbrowser.open(f"file://{log.html}")
-    except Exception:
-        pass
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -2510,6 +2575,52 @@ def generate_summary(gen_report: bool = False) -> None:
     print(metric("Total", str(T), 100.0, lc=C.W, nc=C.W, bc=C.D))
     print(blank())
 
+    # ── Per-phase breakdown ───────────────────────────────────────────────
+    # Column widths: indent(2) + ph(4) + name(19) + total(6) + ok(6) + fail(6) + rate(6) + note(13) = 64
+    PH = 4; PN = 19; TC = 6; OC = 6; FC = 6; RC = 6; NC = IW - 2 - PH - 1 - PN - TC - OC - FC - RC - 6
+    ph_header = (f"  {C.D}{'Ph':<{PH}} {'Phase':<{PN}}{' Total':>{TC}}"
+                 f"{'  Done':>{OC}}{'  Fail':>{FC}}{'  Rate':>{RC}}{'  Notes'}{C.RS}")
+    print(section("BY PHASE"))
+    print(box(ph_header))
+    print(div())
+
+    phase_order = [f"Phase {n}" for n in range(13)]
+    for ph_key in phase_order:
+        ps_data = exe.phase_stats.get(ph_key)
+        if not ps_data or ps_data["total"] == 0:
+            continue
+        ph_num   = ph_key.split()[-1]
+        ph_name  = PHASE_NAMES.get(ph_key, ph_key)[:PN]
+        total_p  = ps_data["total"]
+        ok_p     = ps_data["ok"]
+        fail_p   = ps_data["fail"]
+        rate_p   = ok_p / total_p * 100 if total_p else 0.0
+        ok_c     = C.G if ok_p >= fail_p else C.Y
+        fail_c   = C.R if fail_p > ok_p else C.D
+
+        # Notes: show breakdown of why things failed, or TTP detail for P12
+        if ph_key == "Phase 12" and dt_total > 0:
+            note = f"blk:{dt_blk_n} det:{def_alerted} gap:{true_gaps}"
+        else:
+            parts = []
+            if ps_data.get("denied", 0):
+                parts.append(f"{ps_data['denied']}d")
+            if ps_data.get("timeouts", 0):
+                parts.append(f"{ps_data['timeouts']}t")
+            note = " ".join(parts) if parts else ""
+
+        rate_c = C.G if rate_p >= 70 else C.Y if rate_p >= 40 else C.R
+
+        inner = (f"  {C.D}P{ph_num:<{PH-1}}{C.RS} {C.D}{ph_name:<{PN}}{C.RS}"
+                 f"{ok_c}{total_p:>{TC}}{C.RS}"
+                 f"{ok_c}{ok_p:>{OC}}{C.RS}"
+                 f"{fail_c}{fail_p:>{FC}}{C.RS}"
+                 f"{rate_c}{rate_p:>{RC-1}.0f}%{C.RS}"
+                 f"  {C.D}{note}{C.RS}")
+        print(box(inner))
+
+    print(blank())
+
     # ── Detection validation — % of TTPs tested ───────────────────────────
     if dt_total > 0:
         bl_pct  = dt_blk_n  / dt_total * 100
@@ -2590,6 +2701,28 @@ def generate_summary(gen_report: bool = False) -> None:
         log.write(0, f"  {'Skipped':<{L}} {exe.skip:>5}  ({pct(exe.skip):.1f}%)")
     log.write(0, f"  {'─'*66}")
     log.write(0, f"  {'Total':<{L}} {T:>5}  (100.0%)")
+    log.write(0, "")
+    log.write(0, "  BY PHASE")
+    log.write(0, f"  {'─'*66}")
+    log.write(0, f"  {'Ph':<5} {'Phase':<20} {'Total':>6} {'Done':>6} {'Fail':>6} {'Rate':>6}  Notes")
+    log.write(0, f"  {'─'*66}")
+    for ph_key in [f"Phase {n}" for n in range(13)]:
+        ps_d = exe.phase_stats.get(ph_key)
+        if not ps_d or ps_d["total"] == 0:
+            continue
+        ph_num = ph_key.split()[-1]
+        ph_n   = PHASE_NAMES.get(ph_key, ph_key)[:20]
+        tot    = ps_d["total"]; ok_v = ps_d["ok"]; fa = ps_d["fail"]
+        rate_v = ok_v / tot * 100 if tot else 0.0
+        if ph_key == "Phase 12" and dt_total > 0:
+            note = f"blk:{dt_blk_n} det:{def_alerted} gap:{true_gaps}"
+        else:
+            parts = []
+            if ps_d.get("denied", 0):  parts.append(f"{ps_d['denied']}d")
+            if ps_d.get("timeouts", 0): parts.append(f"{ps_d['timeouts']}t")
+            note = " ".join(parts) if parts else "—"
+        log.write(0, f"  P{ph_num:<4} {ph_n:<20} {tot:>6} {ok_v:>6} {fa:>6} {rate_v:>5.0f}%  {note}")
+    log.write(0, f"  {'─'*66}")
     if dt_total > 0:
         log.write(0, "")
         log.write(0, f"  DETECTION VALIDATION ({dt_total} TTPs — each row % of {dt_total})")
