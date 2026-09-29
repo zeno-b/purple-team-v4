@@ -1,22 +1,5 @@
 #!/usr/bin/env python3
 """
-Purple Team Agent v5.0 — Advanced Windows LOLBAS Edition
-===========================================================
-Native Windows purple-team framework using Living Off The Land Binaries
-and Scripts (LOLBAS) for adversary simulation. No external dependencies
-beyond Python stdlib + optional cryptography for Phase 10.
-
-Features:
-  • 12 reconnaissance phases mapped to MITRE ATT&CK
-  • Dedicated LOLBAS abuse demonstration phase
-  • Concurrent execution engine for speed
-  • HTML + JSON + text reporting
-  • Risk-scored findings with remediation hints
-  • Reversible ransomware simulation
-  • EICAR AV detection test
-  • WMI / scheduled-task persistence simulation
-  • Lateral movement reconnaissance
-
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
     python agent.py --report-only   # Re-generate HTML from last JSON log
