@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """
+
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
     python agent.py --report-only   # Re-generate HTML from last JSON log
@@ -1062,7 +1063,7 @@ def phase_defense() -> None:
 
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
-
+    
     end_phase()
 
 
@@ -2464,69 +2465,71 @@ def generate_summary(gen_report: bool = False) -> None:
     print(div(heavy=True))
     print(blank())
 
-    # Command execution block
-    col_hdr = (f"  {C.D}{'COMMAND EXECUTION':<{LW}}"
-               f"  {'COUNT':>{NW}}  {'PROGRESS':<{BAR}}  {'RATE':>{PW}}{C.RS}")
-    print(box(col_hdr))
-    print(div())
-    # Pre-compute sub-row values
-    dt_exec_n = len(dt_exec)
-    dt_blk_n  = len(dt_blk)
-    recon_ok  = max(0, exe.ok   - dt_exec_n - dt_blk_n)
-    cmd_errs  = max(0, exe.fail - exe.denied - exe.timeouts)
+    # ── Flat breakdown — every row as % of exe.total ─────────────────────
+    dt_exec_n   = len(dt_exec)
+    dt_blk_n    = len(dt_blk)
+    recon_ok    = max(0, exe.ok   - dt_exec_n - dt_blk_n)
+    cmd_errs    = max(0, exe.fail - exe.denied - exe.timeouts)
+    not_tracked = max(0, exe.total - exe.ok - exe.fail - exe.skip)
+    T           = exe.total  # denominator for every pct in this block
 
-    print(metric("Total Actions",    str(exe.total), 100,      nc=C.W, bc=C.D))
-    print(metric("Completed",        str(exe.ok),    ok_pct,   nc=C.G, bc=C.G))
-    if exe.ok > 0:
-        last_ok = ("└─" if not dt_exec_n and not dt_blk_n else
-                   "├─" if dt_exec_n or dt_blk_n else "└─")
-        if recon_ok:
-            glph = "└─" if not dt_exec_n and not dt_blk_n else "├─"
-            print(sub_metric(glph, "Recon & info gathering — output received",    recon_ok,  exe.ok, nc=C.G))
-        if dt_exec_n:
-            glph = "└─" if not dt_blk_n else "├─"
-            print(sub_metric(glph, "TTPs executed — detection gap (alert expected)", dt_exec_n, exe.ok, nc=C.R))
-        if dt_blk_n:
-            print(sub_metric("└─", "TTPs blocked — security controls active",     dt_blk_n,  exe.ok, nc=C.G))
-    print(metric("Blocked / Failed", str(exe.fail),  fail_pct, nc=C.R, bc=C.R))
-    if exe.fail > 0:
-        if exe.denied:
-            glph = "└─" if not exe.timeouts and not cmd_errs else "├─"
-            print(sub_metric(glph, "Access denied / permission — security restriction",  exe.denied,  exe.fail, nc=C.R))
-        if exe.timeouts:
-            glph = "└─" if not cmd_errs else "├─"
-            print(sub_metric(glph, "Timeout / binary not found — environment issue",     exe.timeouts, exe.fail, nc=C.Y))
-        if cmd_errs:
-            print(sub_metric("└─", "No output / target not present or out of scope",     cmd_errs,    exe.fail, nc=C.D))
+    def pct(n: int) -> float:
+        return n / T * 100 if T else 0.0
+
+    print(section("ALL ACTIONS", f"{C.D}{T} actions — each row as % of {T}"))
+    print(bx(f"  {C.D}{'CATEGORY':<{LW}}  {'COUNT':>{NW}}  {'DISTRIBUTION':<{BAR}}  {'RATE':>{PW}}{C.RS}"))
+    print(div())
+
+    # Positive outcomes
+    if recon_ok:
+        print(metric("Data received — recon complete",        str(recon_ok),   pct(recon_ok),   nc=C.G,  bc=C.G))
+    if cmd_errs:
+        print(metric("No output — target not present",        str(cmd_errs),   pct(cmd_errs),   nc=C.D,  bc=C.D))
+
+    # Blocked (security or environment)
+    if exe.denied:
+        print(metric("Blocked — access denied / permission",  str(exe.denied), pct(exe.denied), nc=C.R,  bc=C.R))
+    if exe.timeouts:
+        print(metric("Blocked — timeout / binary not found",  str(exe.timeouts),pct(exe.timeouts),nc=C.Y, bc=C.Y))
+
+    # TTP-specific outcomes
+    if def_alerted:
+        print(metric("TTP executed — Defender alerted",       str(def_alerted),pct(def_alerted),nc=C.Y,  bc=C.Y))
+    if true_gaps:
+        print(metric("TTP executed — undetected (true gap)",  str(true_gaps),  pct(true_gaps),  nc=C.R,  bc=C.R))
+    if dt_blk_n:
+        print(metric("TTP blocked by security control",       str(dt_blk_n),   pct(dt_blk_n),   nc=C.G,  bc=C.G))
+
+    # Remainder
+    if not_tracked:
+        print(metric("Not tracked — staged / manual ops",     str(not_tracked),pct(not_tracked),nc=C.D,  bc=C.D))
     if exe.skip:
-        print(metric("Skipped",      str(exe.skip),  skip_pct, nc=C.Y, bc=C.Y))
+        print(metric("Skipped",                               str(exe.skip),   pct(exe.skip),   nc=C.Y,  bc=C.Y))
+
+    # Total row with separator
+    print(div())
+    print(metric("Total", str(T), 100.0, lc=C.W, nc=C.W, bc=C.D))
     print(blank())
 
-    # Detection validation block
+    # ── Detection validation — % of TTPs tested ───────────────────────────
     if dt_total > 0:
-        ex_pct  = len(dt_exec) / dt_total * 100
-        bl_pct  = len(dt_blk)  / dt_total * 100
+        bl_pct  = dt_blk_n  / dt_total * 100
+        da_pct  = def_alerted / dt_total * 100
+        gap_pct = true_gaps  / dt_total * 100
         rc      = _rating_col(det_rate)
         rating  = _rating(det_rate)
         dr_str  = f"{det_rate:.1f}%" if det_rate is not None else "N/A"
 
-        print(section("DETECTION VALIDATION", f"{C.W}{dt_total} TTPs tested"))
+        print(section("DETECTION VALIDATION", f"{C.W}{dt_total} TTPs — each row % of {dt_total}"))
+        print(bx(f"  {C.D}{'CATEGORY':<{LW}}  {'COUNT':>{NW}}  {'DISTRIBUTION':<{BAR}}  {'RATE':>{PW}}{C.RS}"))
         print(div())
-        print(metric("Executed — not blocked",
-                     f"{len(dt_exec)}/{dt_total}", ex_pct, nc=C.R, bc=C.R))
-        if dt_exec:
-            # Defender alert sub-rows under "Executed"
-            if def_alerted:
-                glph = "└─" if not true_gaps else "├─"
-                print(sub_metric(glph, "Defender alerted (EventID 1116/1117)",
-                                 def_alerted, len(dt_exec), nc=C.Y))
-            if true_gaps:
-                print(sub_metric("└─", "Undetected — no alert raised, true gap",
-                                 true_gaps, len(dt_exec), nc=C.R))
-        print(metric("Blocked by controls",
-                     f"{len(dt_blk)}/{dt_total}",  bl_pct, nc=C.G, bc=C.G))
-
-        # Detection rate now reflects blocked + Defender-alerted
+        if dt_blk_n:
+            print(metric("Blocked by security control",           f"{dt_blk_n}/{dt_total}",  bl_pct,  nc=C.G, bc=C.G))
+        if def_alerted:
+            print(metric("Detected by Defender (1116/1117)",      f"{def_alerted}/{dt_total}",da_pct,  nc=C.Y, bc=C.Y))
+        if true_gaps:
+            print(metric("Undetected — no alert raised (gap)",    f"{true_gaps}/{dt_total}",  gap_pct, nc=C.R, bc=C.R))
+        print(div())
         badge    = f"[{rating}]"
         pct_pad  = NW + 2 + BAR + 2 + PW - len(badge) - 2
         rate_inner = (f"  {rc}{'Detection / Block Rate':<{LW}}{C.RS}"
@@ -2566,38 +2569,42 @@ def generate_summary(gen_report: bool = False) -> None:
     log.write(0, f"  Purple Team v{SCRIPT_VERSION}  ·  Run {log.run_id}  ·  {now}  ·  {m}m {s}s")
     log.write(0, "═" * 70)
     log.write(0, "")
-    log.write(0, "  COMMAND EXECUTION")
-    log.write(0, f"  {'Total Actions':<{L}} {exe.total}")
-    log.write(0, f"  {'Completed':<{L}} {exe.ok} ({ok_pct:.1f}%)")
-    if exe.ok > 0:
-        if recon_ok:
-            log.write(0, f"    {'├─ Recon / info gathering':<{L-4}} {recon_ok} ({recon_ok/exe.ok*100:.1f}% of completed)  commands returned useful data")
-        if dt_exec_n:
-            log.write(0, f"    {'├─ TTPs executed — not blocked':<{L-4}} {dt_exec_n} ({dt_exec_n/exe.ok*100:.1f}% of completed)  blue team should have alerted")
-        if dt_blk_n:
-            log.write(0, f"    {'└─ TTPs blocked by controls':<{L-4}} {dt_blk_n} ({dt_blk_n/exe.ok*100:.1f}% of completed)  security controls working")
-    log.write(0, f"  {'Blocked / Failed':<{L}} {exe.fail} ({fail_pct:.1f}%)")
-    if exe.fail > 0:
-        if exe.denied:
-            log.write(0, f"    {'├─ Access denied / permission':<{L-4}} {exe.denied} ({exe.denied/exe.fail*100:.1f}% of failed)  security restriction in place")
-        if exe.timeouts:
-            log.write(0, f"    {'├─ Timeout / binary not found':<{L-4}} {exe.timeouts} ({exe.timeouts/exe.fail*100:.1f}% of failed)  environment or config issue")
-        if cmd_errs:
-            log.write(0, f"    {'└─ No output / target not present or out of scope':<{L-4}} {cmd_errs} ({cmd_errs/exe.fail*100:.1f}% of failed)")
+    log.write(0, f"  ALL ACTIONS ({T} total — each row % of {T})")
+    log.write(0, f"  {'─'*66}")
+    if recon_ok:
+        log.write(0, f"  {'Data received — recon complete':<{L}} {recon_ok:>5}  ({pct(recon_ok):.1f}%)")
+    if cmd_errs:
+        log.write(0, f"  {'No output — target not present':<{L}} {cmd_errs:>5}  ({pct(cmd_errs):.1f}%)")
+    if exe.denied:
+        log.write(0, f"  {'Blocked — access denied / permission':<{L}} {exe.denied:>5}  ({pct(exe.denied):.1f}%)")
+    if exe.timeouts:
+        log.write(0, f"  {'Blocked — timeout / binary not found':<{L}} {exe.timeouts:>5}  ({pct(exe.timeouts):.1f}%)")
+    if def_alerted:
+        log.write(0, f"  {'TTP executed — Defender alerted':<{L}} {def_alerted:>5}  ({pct(def_alerted):.1f}%)")
+    if true_gaps:
+        log.write(0, f"  {'TTP executed — undetected (true gap)':<{L}} {true_gaps:>5}  ({pct(true_gaps):.1f}%)")
+    if dt_blk_n:
+        log.write(0, f"  {'TTP blocked by security control':<{L}} {dt_blk_n:>5}  ({pct(dt_blk_n):.1f}%)")
+    if not_tracked:
+        log.write(0, f"  {'Not tracked — staged / manual ops':<{L}} {not_tracked:>5}  ({pct(not_tracked):.1f}%)")
     if exe.skip:
-        log.write(0, f"  {'Skipped':<{L}} {exe.skip} ({skip_pct:.1f}%)")
+        log.write(0, f"  {'Skipped':<{L}} {exe.skip:>5}  ({pct(exe.skip):.1f}%)")
+    log.write(0, f"  {'─'*66}")
+    log.write(0, f"  {'Total':<{L}} {T:>5}  (100.0%)")
     if dt_total > 0:
         log.write(0, "")
-        log.write(0, f"  DETECTION VALIDATION  ({dt_total} TTPs tested)")
-        log.write(0, f"  {'Executed — not blocked':<{L}} {len(dt_exec)}/{dt_total} ({len(dt_exec)/dt_total*100:.1f}%)")
+        log.write(0, f"  DETECTION VALIDATION ({dt_total} TTPs — each row % of {dt_total})")
+        log.write(0, f"  {'─'*66}")
+        if dt_blk_n:
+            log.write(0, f"  {'Blocked by security control':<{L}} {dt_blk_n}/{dt_total}  ({dt_blk_n/dt_total*100:.1f}%)")
         if def_alerted:
-            log.write(0, f"    {'├─ Defender alerted (1116/1117)':<{L-4}} {def_alerted} ({def_alerted/len(dt_exec)*100:.1f}% of executed)")
+            log.write(0, f"  {'Detected by Defender (1116/1117)':<{L}} {def_alerted}/{dt_total}  ({def_alerted/dt_total*100:.1f}%)")
         if true_gaps:
-            log.write(0, f"    {'└─ Undetected — no alert, true gap':<{L-4}} {true_gaps} ({true_gaps/len(dt_exec)*100:.1f}% of executed)")
-        log.write(0, f"  {'Blocked by controls':<{L}} {len(dt_blk)}/{dt_total}  ({len(dt_blk)/dt_total*100:.1f}%)")
+            log.write(0, f"  {'Undetected — no alert raised (gap)':<{L}} {true_gaps}/{dt_total}  ({true_gaps/dt_total*100:.1f}%)")
+        log.write(0, f"  {'─'*66}")
         if det_rate is not None:
             log.write(0, f"  {'Detection / Block Rate':<{L}} {det_rate:.1f}%  [{_rating(det_rate)}]")
-            log.write(0, f"    Rate = (blocked {len(dt_blk)} + Defender alerted {def_alerted}) / {dt_total} TTPs")
+            log.write(0, f"    = (blocked {dt_blk_n} + Defender alerted {def_alerted}) / {dt_total} TTPs")
     log.write(0, "")
     log.write(0, f"  FINDINGS ({len(sorted_findings)})  — sorted by severity")
     for f in sorted_findings:
