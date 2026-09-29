@@ -39,7 +39,7 @@ RANSOM_KEY = "PurpleTeam_Decrypt_Key_2024!"
 RANSOM_EXT = ".locked"
 RANSOM_MANIFEST = RANSOM_SIM_DIR / ".manifest"
 
-EICAR = r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+
 
 # ───────────────────────────────────────────────────────────────────────────
 # LOLBAS CATALOGUE
