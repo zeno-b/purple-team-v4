@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
 """
-Purple Team Agent v5.0 — Advanced Windows LOLBAS Edition
-===========================================================
-Native Windows purple-team framework using Living Off The Land Binaries
-and Scripts (LOLBAS) for adversary simulation. No external dependencies
-beyond Python stdlib + optional cryptography for Phase 10.
-
-Features:
-  • 12 reconnaissance phases mapped to MITRE ATT&CK
-  • Dedicated LOLBAS abuse demonstration phase
-  • Concurrent execution engine for speed
-  • HTML + JSON + text reporting
-  • Risk-scored findings with remediation hints
-  • Reversible ransomware simulation
-  • EICAR AV detection test
-  • WMI / scheduled-task persistence simulation
-  • Lateral movement reconnaissance
 
 Usage:
     python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
@@ -506,10 +490,12 @@ log = Logger()
 
 class Executor:
     def __init__(self):
-        self.total = 0
-        self.ok = 0
-        self.fail = 0
-        self.skip = 0
+        self.total    = 0
+        self.ok       = 0
+        self.fail     = 0
+        self.skip     = 0
+        self.denied   = 0   # access denied / permission errors (security control)
+        self.timeouts = 0   # timeout expired or binary not found
         self._cache: Dict[str, str] = {}
 
     def _resolve(self, name: str) -> str:
@@ -562,17 +548,23 @@ class Executor:
             else:
                 self.fail += 1
                 emsg = err.strip().split("\n")[0] if err.strip() else f"exit {r.returncode}"
+                _DENY = ("access denied", "access is denied", "permission denied",
+                         "privilege", "error_access_denied", "cannot open", "cannot read")
+                if any(k in (err + out).lower() for k in _DENY) or r.returncode == 5:
+                    self.denied += 1
                 _err(f"{description} — {emsg}", technique)
                 log.write(8, f"Status: FAILED | {emsg}")
                 log.json_event("FAILED", technique, log.phase, description, emsg, cmd_str)
                 return ActionResult(False, out, err, technique, description, cmd_str)
         except subprocess.TimeoutExpired:
             self.fail += 1
+            self.timeouts += 1
             _err(f"{description} — Timeout ({TIMEOUT_SECONDS}s)", technique)
             log.json_event("TIMEOUT", technique, log.phase, description, "Timeout", cmd_str)
             return ActionResult(False, "", "Timeout", technique, description, cmd_str)
         except FileNotFoundError:
             self.fail += 1
+            self.timeouts += 1
             _err(f"{description} — Binary not found: {cmd[0]}", technique)
             log.json_event("FAILED", technique, log.phase, description, f"Binary not found: {cmd[0]}", cmd_str)
             return ActionResult(False, "", f"Binary not found: {cmd[0]}", technique, description, cmd_str)
@@ -1067,6 +1059,7 @@ def phase_defense() -> None:
 
     # ETW
     exe.run("logman", ["query", "providers"], "T1562.006", "ETW providers")
+
 
     end_phase()
 
@@ -2327,99 +2320,248 @@ def show_banner() -> None:
     print()
 
 
+_ANSI_RE = re.compile(r'\033\[[0-9;]*m')
+
+
+def _vlen(s: str) -> int:
+    """Visible length of a string — excludes ANSI escape codes."""
+    return len(_ANSI_RE.sub('', s))
+
+
+def _rpad(s: str, width: int) -> str:
+    """Right-pad *s* to *width* visible characters."""
+    return s + ' ' * max(0, width - _vlen(s))
+
+
+def _bar(value: float, width: int = 20) -> str:
+    """Filled/empty block progress bar for a 0–100 percentage."""
+    filled = max(0, min(width, round(value / 100 * width)))
+    return "█" * filled + "░" * (width - filled)
+
+
+def _rating(rate: Optional[float]) -> str:
+    if rate is None:  return "N/A"
+    if rate >= 90:    return "EXCELLENT"
+    if rate >= 75:    return "GOOD"
+    if rate >= 50:    return "NEEDS WORK"
+    return "CRITICAL GAP"
+
+
+def _rating_col(rate: Optional[float]) -> str:
+    if rate is None:  return C.D
+    if rate >= 75:    return C.G
+    if rate >= 50:    return C.Y
+    return C.R
+
+
 def generate_summary(gen_report: bool = False) -> None:
     dur = int(time.time() - log.start)
     m, s = dur // 60, dur % 60
+    now  = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
-    # ── Pre-compute all metrics ───────────────────────────────────────────
-    dt_executed = [r for r in log.detection_results if r.outcome == "EXECUTED"]
-    dt_blocked  = [r for r in log.detection_results if r.outcome == "BLOCKED"]
-    dt_total    = len(dt_executed) + len(dt_blocked)
-    detect_rate = (len(dt_blocked) / dt_total * 100) if dt_total > 0 else None
+    # ── Pre-compute ───────────────────────────────────────────────────────
+    dt_exec  = [r for r in log.detection_results if r.outcome == "EXECUTED"]
+    dt_blk   = [r for r in log.detection_results if r.outcome == "BLOCKED"]
+    dt_total = len(dt_exec) + len(dt_blk)
+    det_rate = (len(dt_blk) / dt_total * 100) if dt_total else None
 
-    ok_pct   = (exe.ok   / exe.total * 100) if exe.total else 0
-    fail_pct = (exe.fail / exe.total * 100) if exe.total else 0
-    skip_pct = (exe.skip / exe.total * 100) if exe.total else 0
+    ok_pct   = (exe.ok   / exe.total * 100) if exe.total else 0.0
+    fail_pct = (exe.fail / exe.total * 100) if exe.total else 0.0
+    skip_pct = (exe.skip / exe.total * 100) if exe.total else 0.0
 
-    sev_col: Dict[str, str] = {"CRITICAL": C.R, "HIGH": C.R, "MEDIUM": C.Y, "LOW": C.CYN, "INFO": C.D}
-    sev_counts: Dict[str, int] = {}
-    for f in log.findings:
-        sev_counts[f.severity] = sev_counts.get(f.severity, 0) + 1
+    sev_col: Dict[str, str] = {
+        "CRITICAL": C.R, "HIGH": C.R, "MEDIUM": C.Y, "LOW": C.CYN, "INFO": C.D,
+    }
 
-    rate_col = (C.G if detect_rate and detect_rate >= 75
-                else C.Y if detect_rate and detect_rate >= 50
-                else C.R)
+    # ── Box constants ─────────────────────────────────────────────────────
+    IW  = 78    # inner width (visible chars between ║ borders; 80-col safe)
+    BAR = 16    # progress bar character width
+    NW  = 6     # count column (right-aligned)
+    PW  = 7     # percentage column (right-aligned)
+    #           2 indent + LW + 2 + NW + 2 + BAR + 2 + PW = IW  →  LW = IW - NW - BAR - PW - 8
+    LW  = IW - NW - BAR - PW - 8   # label column (auto-fit)
 
-    W = 34  # label column width
+    def box(inner: str) -> str:
+        """Wrap *inner* (may contain ANSI) in ║ … ║ padded to IW visible chars."""
+        return f"{C.CYN}║{C.RS}{_rpad(inner, IW)}{C.CYN}║{C.RS}"
 
-    # ── Terminal: single consolidated block ──────────────────────────────
-    print()
-    print(f"{C.CYN}╔═══════════════════════════════════════════════════════════════════════╗{C.RS}")
-    print(f"{C.CYN}║{C.RS} {C.W}EXECUTION SUMMARY{C.RS}                                     {C.CYN}║{C.RS}")
-    print(f"{C.CYN}╚═══════════════════════════════════════════════════════════════════════╝{C.RS}")
-    print()
-    print(f"  {'Completed:':<{W}} {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    print(f"  {'Duration:':<{W}} {m}m {s}s")
-    print(f"  {'Total Actions:':<{W}} {exe.total}")
-    print(f"  {C.G}{'Detected / Completed:':<{W}}{C.RS} {exe.ok:<6} ({ok_pct:.1f}%)")
-    print(f"  {C.R}{'Blocked / Failed:':<{W}}{C.RS} {exe.fail:<6} ({fail_pct:.1f}%)")
-    if exe.skip:
-        print(f"  {C.Y}{'Skipped:':<{W}}{C.RS} {exe.skip:<6} ({skip_pct:.1f}%)")
-    if dt_total > 0:
-        ex_col = C.R if dt_executed else C.G
-        bl_col = C.G if dt_blocked  else C.Y
-        print(f"  {ex_col}{'TTPs Executed (detection gaps):':<{W}}{C.RS} {len(dt_executed)}/{dt_total:<4} ({len(dt_executed)/dt_total*100:.1f}%)")
-        print(f"  {bl_col}{'TTPs Blocked by controls:':<{W}}{C.RS} {len(dt_blocked)}/{dt_total:<4} ({len(dt_blocked)/dt_total*100:.1f}%)")
-        print(f"  {rate_col}{'Detection / Block Rate:':<{W}}{C.RS} {detect_rate:.1f}%")
-    print()
+    def div(heavy: bool = False) -> str:
+        return (f"{C.CYN}╠{'═'*(IW+2)}╣{C.RS}" if heavy
+                else box(f"  {C.D}{'─'*(IW-4)}{C.RS}"))
 
-    # ── Findings ──────────────────────────────────────────────────────────
-    print(f"  {C.W}── Findings ({len(log.findings)}) ──{C.RS}")
-    if log.findings:
-        for f in log.findings:
-            col = sev_col.get(f.severity, C.W)
-            print(f"  {col}[{f.severity}]{C.RS} {f.message}")
-    else:
-        print(f"  {C.D}No findings recorded.{C.RS}")
-    print()
+    def blank() -> str:
+        return box("")
 
-    # ── Output files ──────────────────────────────────────────────────────
-    print(f"  {C.W}── Output Files ──{C.RS}")
-    print(f"  Text:    {log.txt}")
-    print(f"  JSON:    {log.json}")
-    print(f"  HTML:    {log.html}")
-    print()
+    def section(title: str, right: str = "") -> str:
+        t = f"  {C.W}{title}{C.RS}"
+        if right:
+            r = f"{right}  "
+            return box(_rpad(t, IW - _vlen(r)) + r)
+        return box(t)
+
+    def metric(label: str, count: str, pct: float,
+               lc: str = C.D, nc: str = C.W, bc: str = C.D) -> str:
+        bar_s  = f"{bc}{_bar(pct, BAR)}{C.RS}"
+        pct_s  = f"{pct:.1f}%"
+        inner  = (f"  {lc}{label:<{LW}}{C.RS}"
+                  f"  {nc}{count:>{NW}}{C.RS}"
+                  f"  {bar_s}"
+                  f"  {pct_s:>{PW}}")
+        return box(inner)
+
+    def sub_metric(prefix: str, label: str, count: int, of: int,
+                   nc: str = C.D) -> str:
+        """Indented sub-row: tree glyph + label (SLW) + count (NW) + pct-of-parent (7)."""
+        # Visible: "    " (4) + prefix (2) + " " (1) + SLW + "  " (2) + NW + "  " (2) + pct (7) = IW
+        SLW   = IW - NW - 18   # 18 = 4+2+1+2+2+7
+        pct_s = f"({count/of*100:.1f}%)" if of > 0 else "      "
+        inner = (f"    {C.D}{prefix} {C.RS}"
+                 f"{nc}{label:<{SLW}}{C.RS}"
+                 f"  {nc}{count:>{NW}}{C.RS}"
+                 f"  {C.D}{pct_s:<7}{C.RS}")
+        return box(inner)
 
     log.finalize(exe.total, exe.ok, exe.fail, exe.skip)
 
-    # ── Text log: same consolidated block ────────────────────────────────
-    L = 34
-    log.write(0, "")
-    log.write(0, "══════════════════════════════════════════════════════════════════")
-    log.write(0, "EXECUTION SUMMARY")
-    log.write(0, "══════════════════════════════════════════════════════════════════")
-    log.write(0, f"  {'Completed:':<{L}} {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}")
-    log.write(0, f"  {'Duration:':<{L}} {m}m {s}s")
-    log.write(0, f"  {'Total Actions:':<{L}} {exe.total}")
-    log.write(0, f"  {'Detected / Completed:':<{L}} {exe.ok} ({ok_pct:.1f}%)")
-    log.write(0, f"  {'Blocked / Failed:':<{L}} {exe.fail} ({fail_pct:.1f}%)")
+    # ── Terminal output ───────────────────────────────────────────────────
+    print()
+    border = f"{C.CYN}╔{'═'*(IW+2)}╗{C.RS}"
+    print(border)
+    hdr = f"  {C.W}Purple Team v{SCRIPT_VERSION}{C.RS}  ·  Run {log.run_id}  ·  {now}  ·  {m}m {s}s"
+    print(box(hdr))
+    print(div(heavy=True))
+    print(blank())
+
+    # Command execution block
+    col_hdr = (f"  {C.D}{'COMMAND EXECUTION':<{LW}}"
+               f"  {'COUNT':>{NW}}  {'PROGRESS':<{BAR}}  {'RATE':>{PW}}{C.RS}")
+    print(box(col_hdr))
+    print(div())
+    # Pre-compute sub-row values
+    dt_exec_n = len(dt_exec)
+    dt_blk_n  = len(dt_blk)
+    recon_ok  = max(0, exe.ok   - dt_exec_n - dt_blk_n)
+    cmd_errs  = max(0, exe.fail - exe.denied - exe.timeouts)
+
+    print(metric("Total Actions",    str(exe.total), 100,      nc=C.W, bc=C.D))
+    print(metric("Completed",        str(exe.ok),    ok_pct,   nc=C.G, bc=C.G))
+    if exe.ok > 0:
+        last_ok = ("└─" if not dt_exec_n and not dt_blk_n else
+                   "├─" if dt_exec_n or dt_blk_n else "└─")
+        if recon_ok:
+            glph = "└─" if not dt_exec_n and not dt_blk_n else "├─"
+            print(sub_metric(glph, "Recon & info gathering — output received",    recon_ok,  exe.ok, nc=C.G))
+        if dt_exec_n:
+            glph = "└─" if not dt_blk_n else "├─"
+            print(sub_metric(glph, "TTPs executed — detection gap (alert expected)", dt_exec_n, exe.ok, nc=C.R))
+        if dt_blk_n:
+            print(sub_metric("└─", "TTPs blocked — security controls active",     dt_blk_n,  exe.ok, nc=C.G))
+    print(metric("Blocked / Failed", str(exe.fail),  fail_pct, nc=C.R, bc=C.R))
+    if exe.fail > 0:
+        if exe.denied:
+            glph = "└─" if not exe.timeouts and not cmd_errs else "├─"
+            print(sub_metric(glph, "Access denied / permission — security restriction",  exe.denied,  exe.fail, nc=C.R))
+        if exe.timeouts:
+            glph = "└─" if not cmd_errs else "├─"
+            print(sub_metric(glph, "Timeout / binary not found — environment issue",     exe.timeouts, exe.fail, nc=C.Y))
+        if cmd_errs:
+            print(sub_metric("└─", "Command error / bad args — e.g. wrong key format",  cmd_errs,    exe.fail, nc=C.D))
     if exe.skip:
-        log.write(0, f"  {'Skipped:':<{L}} {exe.skip} ({skip_pct:.1f}%)")
+        print(metric("Skipped",      str(exe.skip),  skip_pct, nc=C.Y, bc=C.Y))
+    print(blank())
+
+    # Detection validation block
     if dt_total > 0:
-        log.write(0, f"  {'TTPs Executed (gaps):':<{L}} {len(dt_executed)}/{dt_total} ({len(dt_executed)/dt_total*100:.1f}%)")
-        log.write(0, f"  {'TTPs Blocked by controls:':<{L}} {len(dt_blocked)}/{dt_total} ({len(dt_blocked)/dt_total*100:.1f}%)")
-        if detect_rate is not None:
-            log.write(0, f"  {'Detection / Block Rate:':<{L}} {detect_rate:.1f}%")
+        ex_pct  = len(dt_exec) / dt_total * 100
+        bl_pct  = len(dt_blk)  / dt_total * 100
+        rc      = _rating_col(det_rate)
+        rating  = _rating(det_rate)
+        dr_str  = f"{det_rate:.1f}%" if det_rate is not None else "N/A"
+
+        print(section("DETECTION VALIDATION", f"{C.W}{dt_total} TTPs tested"))
+        print(div())
+        print(metric("Executed — not blocked",
+                     f"{len(dt_exec)}/{dt_total}", ex_pct, nc=C.R, bc=C.R))
+        print(metric("Blocked by controls",
+                     f"{len(dt_blk)}/{dt_total}",  bl_pct, nc=C.G, bc=C.G))
+
+        # Detection rate — pct + verdict badge, fills same width as count+bar+pct above
+        badge    = f"[{rating}]"
+        pct_pad  = NW + 2 + BAR + 2 + PW - len(badge) - 2   # "  " separator before badge
+        rate_inner = (f"  {rc}{'Detection / Block Rate':<{LW}}{C.RS}"
+                      f"  {rc}{dr_str:>{pct_pad}}{C.RS}"
+                      f"  {rc}{badge}{C.RS}")
+        print(box(rate_inner))
+        print(blank())
+
+    # Findings
+    print(div(heavy=True))
+    print(section(f"FINDINGS  ({len(log.findings)})"))
+    print(blank())
+    if log.findings:
+        for f in log.findings:
+            col  = sev_col.get(f.severity, C.W)
+            sev  = f"[{f.severity}]"
+            # Shorten message to fit: IW - 2 indent - sev(10) - space
+            max_msg = IW - 2 - 10 - 1
+            msg     = f.message[:max_msg]
+            inner   = f"  {col}{sev:<10}{C.RS}{msg}"
+            print(box(inner))
+    else:
+        print(box(f"  {C.D}No findings recorded.{C.RS}"))
+    print(blank())
+
+    # Output files
+    print(div(heavy=True))
+    for label, path in [("Text", str(log.txt)), ("JSON", str(log.json)), ("HTML", str(log.html))]:
+        inner = f"  {C.W}{label}:{C.RS}  {path}"
+        print(box(inner))
+    print(f"{C.CYN}╚{'═'*(IW+2)}╝{C.RS}")
+    print()
+
+    # ── Text log ─────────────────────────────────────────────────────────
+    L = 32
     log.write(0, "")
-    log.write(0, f"── Findings ({len(log.findings)}) ──")
+    log.write(0, "═" * 70)
+    log.write(0, f"  Purple Team v{SCRIPT_VERSION}  ·  Run {log.run_id}  ·  {now}  ·  {m}m {s}s")
+    log.write(0, "═" * 70)
+    log.write(0, "")
+    log.write(0, "  COMMAND EXECUTION")
+    log.write(0, f"  {'Total Actions':<{L}} {exe.total}")
+    log.write(0, f"  {'Completed':<{L}} {exe.ok} ({ok_pct:.1f}%)")
+    if exe.ok > 0:
+        if recon_ok:
+            log.write(0, f"    {'├─ Recon / info gathering':<{L-4}} {recon_ok} ({recon_ok/exe.ok*100:.1f}% of completed)  commands returned useful data")
+        if dt_exec_n:
+            log.write(0, f"    {'├─ TTPs executed — not blocked':<{L-4}} {dt_exec_n} ({dt_exec_n/exe.ok*100:.1f}% of completed)  blue team should have alerted")
+        if dt_blk_n:
+            log.write(0, f"    {'└─ TTPs blocked by controls':<{L-4}} {dt_blk_n} ({dt_blk_n/exe.ok*100:.1f}% of completed)  security controls working")
+    log.write(0, f"  {'Blocked / Failed':<{L}} {exe.fail} ({fail_pct:.1f}%)")
+    if exe.fail > 0:
+        if exe.denied:
+            log.write(0, f"    {'├─ Access denied / permission':<{L-4}} {exe.denied} ({exe.denied/exe.fail*100:.1f}% of failed)  security restriction in place")
+        if exe.timeouts:
+            log.write(0, f"    {'├─ Timeout / binary not found':<{L-4}} {exe.timeouts} ({exe.timeouts/exe.fail*100:.1f}% of failed)  environment or config issue")
+        if cmd_errs:
+            log.write(0, f"    {'└─ Command error / bad arguments':<{L-4}} {cmd_errs} ({cmd_errs/exe.fail*100:.1f}% of failed)  e.g. wrong key, no output")
+    if exe.skip:
+        log.write(0, f"  {'Skipped':<{L}} {exe.skip} ({skip_pct:.1f}%)")
+    if dt_total > 0:
+        log.write(0, "")
+        log.write(0, f"  DETECTION VALIDATION  ({dt_total} TTPs tested)")
+        log.write(0, f"  {'Executed — not blocked':<{L}} {len(dt_exec)}/{dt_total} ({len(dt_exec)/dt_total*100:.1f}%)")
+        log.write(0, f"  {'Blocked by controls':<{L}} {len(dt_blk)}/{dt_total}  ({len(dt_blk)/dt_total*100:.1f}%)")
+        if det_rate is not None:
+            log.write(0, f"  {'Detection / Block Rate':<{L}} {det_rate:.1f}%  [{_rating(det_rate)}]")
+    log.write(0, "")
+    log.write(0, f"  FINDINGS ({len(log.findings)})")
     for f in log.findings:
-        log.write(0, f"  [{f.severity}] {f.message}")
+        log.write(0, f"  [{f.severity:<8}]  {f.message}")
     log.write(0, "")
-    log.write(0, "Output Files:")
-    log.write(0, f"  Text:    {log.txt}")
-    log.write(0, f"  JSON:    {log.json}")
-    log.write(0, f"  HTML:    {log.html}")
-    log.write(0, "══════════════════════════════════════════════════════════════════")
+    log.write(0, f"  Text: {log.txt}")
+    log.write(0, f"  JSON: {log.json}")
+    log.write(0, f"  HTML: {log.html}")
+    log.write(0, "═" * 70)
 
     if gen_report:
         generate_html_report()
