@@ -1,12 +1,4 @@
-Two issues found before rewriting:
 
-**Table 1 (Objectives):** Phases 1, 2, 3, 4, 8, and 9 had no dedicated objective. The previous five objectives only covered phases 5, 6, 7, 10, and 11. Expanded to 11 objectives with explicit 1:1 phase coverage.
-
-**Table 2 (Playbook):** Execution order was wrong for phases 8, 10, and 11. In the code, `create_staging_manifest()` runs before `COMMANDS[8]`, `impact_simulation()` runs before `COMMANDS[10]`, and `eicar_test()` runs before `COMMANDS[11]`. The two PS commands in phase 11 are post-EICAR validation queries, not pre-checks. Also: phase 1 and phase 11 both run `Get-MpComputerStatus` but with different fields; phase 6 and phase 11 both run `Get-MpPreference` with different fields. These are now distinguished. All commands confirmed present.
-
-**Table 3:** No change needed; times from previous response stand.
-
----
 
 ## Tabel 1: Doelstellingen
 
