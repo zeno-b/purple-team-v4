@@ -735,7 +735,6 @@ def phase_env() -> None:
         _err("Not running on Windows — this agent requires Windows", "T1082")
         sys.exit(1)
     _ok("Running on Windows", "T1082")
-    self.run_action("ps", "Set-Clipboard -Value 'FAKE CLIPBOARD CONTENTS'", "Seed fake credential string to clipboard — overwrites real content before phase 8 capture", 0, "T1115")
     # Enumerate available LOLBAS binaries
     available = []
     missing = []
@@ -1217,6 +1216,8 @@ def phase_collection() -> None:
 
     exe.cmd('dir "C:\\\\Users\\\\*\\\\*.pst" /s /b 2>nul && dir "C:\\\\Users\\\\*\\\\*.ost" /s /b 2>nul',
             "T1114.001", "Email archives")
+    exe.ps("try { Set-Clipboard -Value 'FAKE CLIPBOARD CONTENTS' } "
+           "catch { Write-Output 'Unavailable' }", "T1115", "Clipboard contents")
     exe.ps("try { Get-Clipboard -ErrorAction SilentlyContinue | Select-Object -First 5 } "
            "catch { Write-Output 'Unavailable' }", "T1115", "Clipboard contents")
     exe.cmd(r'dir "C:\\\\Users\\\\*\\\\AppData\\\\Roaming\\\\Microsoft\\\\Office\\\\Recent" /b 2>nul',
