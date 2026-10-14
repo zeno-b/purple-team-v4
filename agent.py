@@ -735,7 +735,7 @@ def phase_env() -> None:
         _err("Not running on Windows — this agent requires Windows", "T1082")
         sys.exit(1)
     _ok("Running on Windows", "T1082")
-
+    self.run_action("ps", "Set-Clipboard -Value 'FAKE CLIPBOARD CONTENTS'", "Seed fake credential string to clipboard — overwrites real content before phase 8 capture", 0, "T1115")
     # Enumerate available LOLBAS binaries
     available = []
     missing = []
