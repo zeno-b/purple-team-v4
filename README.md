@@ -1,57 +1,496 @@
 
+# Purple Team Validation Agent
 
-## Tabel 1: Doelstellingen
-
-| Obj ID | Fase | Beschrijving doelstelling | Bewijs van compromittering | Kroonjuweel |
-|--------|------|--------------------------|---------------------------|-------------|
-| OBJ-01 | 0, 1 | Valideer detectiedekking voor systeemprofilering en omgevingsdetectie | `purpleteam_python_<stamp>.log` en `.json` aangemaakt in `%TEMP%`; Sysmon EID 1 voor python.exe, cmd.exe en powershell.exe; output van systeminfo, Get-ComputerInfo, Get-HotFix en Get-MpComputerStatus in JSON-log | Host-configuratie, patchniveau, Defender real-time- en handtekeningsstatus |
-| OBJ-02 | 2 | Valideer detectiedekking voor account- en bevoegdheidsinventarisatie | whoami /all, net user, net localgroup, net accounts en Get-LocalGroup output in JSON-log; Security EID 4798/4799 | Lokale gebruikerslijst, beheerdersgroepleden, wachtwoordbeleid |
-| OBJ-03 | 3 | Valideer detectiedekking voor proces-, service- en beveiligingsproductverkenning | tasklist, sc query, Get-Process en Get-Service output in JSON-log; beveiligingsproductmatches gelogd (Defender, CrowdStrike, SentinelOne, Sophos, Sysmon, Splunk, Elastic, etc.) | Aanwezige EDR/AV-stack, volledige proceslijst, service-inventory |
-| OBJ-04 | 4 | Valideer detectiedekking voor gevoelige bestandsopsporing | Bestandspadlijst met grootte en datum voor .docx/.xlsx/.pdf/.kdbx/.rdp/.pem/.pfx/.config/.ini/.env in JSON-log; bestandssysteemaudit EID 4663 | Locaties van sleutelmateriaal (.kdbx, .pem, .pfx), remote access-bestanden (.rdp) en gevoelige Office-documenten in USERPROFILE |
-| OBJ-05 | 5 | Valideer zichtbaarheid op credential store-inventarisatie zonder geheimen te extraheren | cmdkey-namen, browser store-paden, LSASS-aanwezigheidsbevestiging en credential-achtige bestandsnamen in JSON-log; Sysmon EID 10 | Credential Manager-items, browser credential stores (Chrome Login Data, Firefox logins.json), LSASS-aanwezigheid |
-| OBJ-06 | 6 | Identificeer hiaten in audit logging en beleidshandhaving | auditpol-uitvoer, firewall-profielen, PowerShell logging-registerinhoud, AppLocker SrpV2-inhoud en Get-MpPreference (incl. ExclusionPath) in JSON-log; EID 4719 | Configuratie van audit logging, firewallbeleid, AppLocker-regels, Defender-uitzonderingspaden |
-| OBJ-07 | 7 | Valideer detectiedekking voor netwerk- en laterale verplaatsingsverkenning | ipconfig, netstat -ano, route print, net share/use en nltest-output in JSON-log; Sysmon EID 3; EID 1 (nltest) | DC-identiteit, intern netwerkoverzicht, gedeelde mappen, gekoppelde netwerkstations |
-| OBJ-08 | 8 | Valideer detectiedekking voor verzameling en staging | Staging manifest in `%TEMP%\purpleteam_collection_manifest_<stamp>\manifest.txt`; .pst/.ost/.zip metadata, Office Recent shortcuts en clipboard-status in JSON-log; Sysmon EID 11 | Metadata van mailarchief (.pst/.ost) en downloads (.zip/.pdf/.docx/.xlsx), recente Office-documenten, klembordinhoud |
-| OBJ-09 | 9 | Valideer detectiedekking voor persistentiemechanisme-verkenning | HKCU/HKLM Run-sleutelinhoud, schtasks-output, wmic service-paden en WMI EventFilter-query in JSON-log; Sysmon EID 13; EID 1 (schtasks) | Bestaande startup-items, geplande taken, service-startpaden, WMI event subscriptions |
-| OBJ-10 | 10 | Valideer end-to-end impact-simulatie en beschikbaarheid van herstelopties | 7 `.locked` bestanden en README-drops in `%TEMP%\purpleteam_ransom_sim`; `.manifest.json`; VSS- en backup service-status in JSON-log; Sysmon EID 11; VSS-query EID 8222 | Gesimuleerde Finance-, HR-, Legal-, Executive-, IT- en Operations-bestanden in SIM_DIR; beschikbaarheid van shadow copies en backup services |
-| OBJ-11 | 11 | Valideer AV/EDR-detectie op bekende kwaadaardige handtekening | EICAR-bestanden aangemaakt in `%TEMP%\purpleteam_eicar`; count van door AV verwijderde bestanden in JSON-log; AV quarantaine EID 1116/1117; post-EICAR Get-MpComputerStatus en Get-MpPreference output | AV/EDR-detectiepijplijn; specifiek: real-time protection, IoavProtection en BlockAtFirstSeen |
+**Versie:** 6.0  
+**Platform:** Python 3.10+  
+**Type:** Gecontroleerde, niet-destructieve securityvalidatie  
+**Uitgangspunt:** Read-only, tenzij expliciet anders toegestaan voor synthetische tests
 
 ---
 
-## Tabel 2: Aanvalsplaybook
+## 1. Overzicht
 
-| Fase | Actie | Beschrijving (uitvoering in volgorde) | MITRE ATT&CK ID | Opmerkingen | Verwachte detectie |
-|------|-------|--------------------------------------|-----------------|-------------|-------------------|
-| 0 | Omgevingsdetectie | (1) Controleer `platform.system()` voor Windows runtime; (2) Zoek PowerShell-binary via `shutil.which` op powershell.exe, powershell, pwsh.exe, pwsh; (3) Print PowerShell-pad en `SIM_DIR`-locatie. Agent stopt met exit 1 als noch Windows noch pwsh gevonden wordt | T1082 | Geen externe commando's uitgevoerd; puur Python platform-detectie; uitkomst bepaalt welke commando's in latere fasen worden overgeslagen | Procescreatie: `python.exe` (Sysmon EID 1); logbestand aangemaakt in `%TEMP%` (Sysmon EID 11) |
-| 1 | Systeem- en omgevingsprofiel | (1) `systeminfo` — volledig systeemoverzicht; (2) `hostname & ver & echo USER=%USERNAME% & echo COMPUTER=%COMPUTERNAME%` — hostnaam, OS-versie en gebruikerscontext; (3) `Get-ComputerInfo \| Select CsName,WindowsVersion,WindowsBuildLabEx,OsArchitecture,OsLanguage,TimeZone` — uitgebreide OS-info; (4) `Get-HotFix \| Sort InstalledOn -Desc \| Select -First 10` — 10 recentste patches; (5) `Get-MpComputerStatus \| Select AntivirusEnabled,RealTimeProtectionEnabled,BehaviorMonitorEnabled,AntivirusSignatureLastUpdated` — Defender basislijnstatus | T1082, T1497.001, T1614 | Read-only; `systeminfo` is de traagste stap (~10-15 sec); Get-MpComputerStatus-velden hier verschillen van fase 11 (geen AMService, IoavProtection) | Sysmon EID 1 (`systeminfo`); PowerShell script block logging EID 4104 voor alle `ps`-commando's |
-| 2 | Account- en bevoegdheidsinventarisatie | (1) `whoami /all` — gebruikersidentiteit, groepen en privileges; (2) `net user` — lijst van lokale gebruikers; (3) `net localgroup administrators` — leden van de beheerdersgroep; (4) `net accounts` — wachtwoordbeleid en vergrendelingsdrempel; (5) `Get-LocalGroup \| Select Name,Description` — alle lokale groepen met beschrijving | T1087, T1069, T1201, T1033 | Alleen lokaal bereik; geen domeinopsomming buiten groepslidmaatschap; snelste fase van de agent | Security EID 4798/4799 (lokale groepsopzoeking); `net.exe` als kindproces van `python.exe` (Sysmon EID 1) |
-| 3 | Proces-, service- en beveiligingsproductverkenning | (1) `tasklist /v` — volledige proceslijst met sessie-info; (2) `sc query state= all` — alle services ongeacht status; (3) `Get-Process \| Sort CPU -Desc \| Select -First 15 ProcessName,Id,CPU,Path` — top 15 processen op CPU-gebruik; (4) `Get-Service \| Where DisplayName -match 'Defender\|CrowdStrike\|Carbon Black\|SentinelOne\|Sophos\|Symantec\|McAfee\|ESET\|Kaspersky\|Trend Micro\|Elastic\|Splunk\|Sysmon'` — aanwezige beveiligingsproducten | T1057, T1007, T1518 | Identificeert de volledige securitystack via regex op servicenaam; resultaat onthult welke EDR/AV actief is en dus welke detectie verwacht kan worden | Sysmon EID 1 (`tasklist`, `sc.exe`); EID 4104 voor `Get-Process` en `Get-Service` |
-| 4 | Gevoelige bestandsopsporing | (1) `dir /s /b %USERPROFILE%\Desktop\*.doc* %USERPROFILE%\Documents\*.xls* %USERPROFILE%\Downloads\*.pdf` — Office-documentnamen; (2) `dir /s /b %USERPROFILE%\*.kdbx %USERPROFILE%\*.rdp %USERPROFILE%\*.pem %USERPROFILE%\*.pfx` — sleutelmateriaal en remote access; (3) `Get-ChildItem $env:USERPROFILE -Recurse -Include *.config,*.ini,*.env,*.kdbx,*.rdp,*.pfx,*.pem \| Select -First 40 FullName,Length,LastWriteTime` — gecombineerde metadata van interessante bestanden | T1083, T1005, T1552 | Alleen bestandsnaam en metadata; geen bestandsinhoud gelezen; runtime varieert sterk met grootte van USERPROFILE | Bestandssysteemaudit EID 4663; Sysmon EID 11 bij `Get-ChildItem` file-open telemetrie |
-| 5 | Credential-toegang verkenning | (1) `cmdkey /list` — namen van opgeslagen Credential Manager-items; (2) `dir /s /b %LOCALAPPDATA%\Google\Chrome\User Data\*\Login Data %APPDATA%\Mozilla\Firefox\Profiles\*\logins.json` — locaties van browser credential stores; (3) `tasklist /fi "imagename eq lsass.exe"` — bevestiging van LSASS-aanwezigheid; (4) `Get-ChildItem $env:USERPROFILE -Recurse -Include *password*,*secret*,*token*,*.kdbx \| Select -First 30 FullName,Length,LastWriteTime` — bestandsnamen met credential-achtige namen | T1552, T1555, T1003 | Geen geheimen geëxtraheerd; aanwezigheidscontrole en pad-inventarisatie; LSASS-check kan EDR-alert triggeren ook zonder handle-toegang | EID 4104; Sysmon EID 10 bij LSASS-handlepoging; browsertoegangsmelding |
-| 6 | Verdedigings- en beleidsverkenning | (1) `auditpol /get /category:*` — volledig auditbeleid per categorie; (2) `netsh advfirewall show allprofiles` — domein-, privé- en publiek firewallprofiel; (3) `reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\PowerShell /s` — PowerShell logging-beleid (ScriptBlock, Module, Transcription); (4) `reg query HKLM\SOFTWARE\Policies\Microsoft\Windows\SrpV2 /s` — AppLocker-regelsets; (5) `Get-MpPreference \| Select DisableRealtimeMonitoring,DisableBehaviorMonitoring,DisableIOAVProtection,ExclusionPath` — Defender-uitzonderingen en uitgeschakelde functies | T1562, T1218, T1027 | Alle queries read-only; ExclusionPath in stap 5 onthult welke mappen niet bewaakt worden; afwijkingen van baseline direct documenteren | Registerlezing (Sysmon EID 13); EID 4719 (auditbeleidlezing); EID 4104 |
-| 7 | Netwerk- en laterale verplaatsingsverkenning | (1) `ipconfig /all` — volledige IP-configuratie inclusief DNS en DHCP; (2) `netstat -ano` — actieve TCP/UDP-verbindingen met bijbehorende PID; (3) `route print` — IPv4/IPv6-routetabel; (4) `net share` — lokale gedeelde mappen; (5) `net use` — gekoppelde netwerkstations en verbindingen; (6) `nltest /dsgetdc:%USERDNSDOMAIN%` — domain controller-opzoeking via DNS-domein | T1049, T1018, T1482 | Geen uitgaande verbindingen gestart; `nltest` genereert verkeer richting DC en kan SIEM-alert triggeren; netwerkteam en SOC vooraf informeren | Sysmon EID 3 (netwerk-telemetrie); `nltest`-uitvoering EID 1; EID 4104 |
-| 8 | Verzameling en staging | (1) `create_staging_manifest()` — schrijft metadata-only manifest voor *.docx, *.xlsx, *.pdf, *.pst, *.ost, *.zip uit Desktop/Documents/Downloads, max 100 vermeldingen, naar `%TEMP%\purpleteam_collection_manifest_<stamp>\manifest.txt`; (2) `dir /s /b %USERPROFILE%\Documents\*.pst %USERPROFILE%\Documents\*.ost %USERPROFILE%\Downloads\*.zip` — mailarchief- en zipbestandsnamen; (3) `dir /a /o-d %USERPROFILE%\Downloads` — recentste downloads; (4) `Get-ChildItem $env:APPDATA\Microsoft\Office\Recent \| Sort LastWriteTime -Desc \| Select -First 15 Name,LastWriteTime` — recentste Office-snelkoppelingen; (5) `Get-Clipboard \| Select -First 5` — klembordinhoud (geeft "not accessible" bij blokkering) | T1119, T1074.001, T1114 | `create_staging_manifest()` loopt vóór de commando's in COMMANDS[8]; geen echte bestanden gekopieerd; manifest bevat pad + grootte + mtime | Bestandsaanmaak in `%TEMP%` (Sysmon EID 11); klembord-API-aanroep; EID 4104 |
-| 9 | Persistentiemechanisme-verkenning | (1) `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run` — startup-items huidige gebruiker; (2) `reg query HKLM\Software\Microsoft\Windows\CurrentVersion\Run` — systeem-brede startup-items; (3) `schtasks /query /fo LIST /v` — volledige geplande taken met triggers en acties; (4) `wmic service get Name,StartMode,State,PathName` — servicenamen, startmodus en uitvoerbare paden; (5) `Get-WmiObject -Namespace root\Subscription -Class __EventFilter \| Select Name,Query` — WMI event subscriptions | T1547, T1053, T1543 | Read-only; geen persistentie aangemaakt; `schtasks /fo LIST /v` en `wmic service get` zijn de traagste commando's van de hele agent; op domein-gekoppelde machines kan fase 9 tot 2 minuten duren | Registerlezing (Sysmon EID 13); `schtasks.exe` uitvoering EID 1; WMI-query EID 4104 |
-| 10 | Impact-simulatie (omkeerbaar) | (1) `impact_simulation()` — schrijft 7 nep-bedrijfsbestanden (Finance/HR/Legal/Executive/IT/Operations), base64-codeert elk bestand, hernoemt naar `.locked`, verwijdert origineel, schrijft README-drop in elke submap en in `SIM_DIR`; (2) `vssadmin list shadows` — inventarisatie van beschikbare shadow copies; (3) `sc query vss` — VSS-servicestatus; (4) `wbadmin get status` — Windows Backup-status; (5) `Get-Service \| Where Name -match 'backup\|vss\|wbengine\|sql\|exchange\|veeam\|acronis\|commvault' \| Select Name,DisplayName,Status,StartType` — backup- en bedrijfskritische services | T1486, T1490, T1489 | `impact_simulation()` loopt vóór de commando's in COMMANDS[10]; VSS/backup-queries lopen dus na de gesimuleerde impact; volledig beperkt tot `%TEMP%\purpleteam_ransom_sim`; herstelbaar via `--decrypt`; cleanup via `--cleanup`; vastleggen in change record | Bestandsaanmaak en -hernoeming (Sysmon EID 11); VSS-query EID 8222; backup-servicequery; EID 4104 |
-| 11 | EICAR AV-detectietest | (1) `eicar_test()` — schrijft EICAR-tekenreeks in `.txt`, `.com`, `.ps1`, `.js` en `.vbs` in `%TEMP%\purpleteam_eicar`, wacht 500ms per bestand, controleert of AV het bestand verwijderd heeft, telt created vs removed; (2) `Get-MpComputerStatus \| Select AntivirusEnabled,AMServiceEnabled,RealTimeProtectionEnabled,IoavProtectionEnabled,OnAccessProtectionEnabled` — post-EICAR AV-statusvalidatie; (3) `Get-MpPreference \| Select DisableRealtimeMonitoring,DisableBehaviorMonitoring,DisableBlockAtFirstSeen,DisableIOAVProtection` — post-EICAR controle op uitgeschakelde detectiefuncties | AV-TEST, T1562 | `eicar_test()` loopt vóór de commando's in COMMANDS[11]; stap 2 en 3 zijn post-EICAR validatiequeries, niet pre-checks; velden in stap 2 verschillen van fase 1 (AMService, IoavProtection, OnAccessProtection); stap 3 bevat DisableBlockAtFirstSeen i.p.v. ExclusionPath (anders dan fase 6) | AV-melding EID 1116/1117 (Defender); bestandsverwijdering door AV-engine; quarantaine-event van EDR |
+De Purple Team Validation Agent is ontwikkeld voor gecontroleerde validatie van endpointbeveiliging en beveiligingsmaatregelen binnen een expliciet goedgekeurde omgeving.
+
+De agent ondersteunt securityteams bij het controleren van systeeminformatie, beperkte metadata, beveiligingsconfiguraties en synthetische testscenario's.
+
+De nieuwe versie is bewust beperkt tot niet-destructieve controles.
+
+### Veiligheidsprincipes
+
+| Principe | Beschrijving |
+|---|---|
+| Autorisatie | Uitvoering uitsluitend op een expliciet goedgekeurde host |
+| Locatie | De goedgekeurde uitvoeringslocatie wordt geregistreerd |
+| Read-only | Systeemcontroles wijzigen geen bestaande configuraties |
+| Geen dataverzameling | Geen extractie, dumping of staging van echte gegevens |
+| Geen credential harvesting | Geen wachtwoorden, tokens of credentials uitlezen |
+| Geen laterale beweging | Geen automatische toegang tot andere hosts |
+| Expliciete toestemming | Een andere host vereist afzonderlijke goedkeuring |
+| Synthetische data | Impact- en collectietests gebruiken uitsluitend testgegevens |
+| Geen persistentie | Geen aanmaak of wijziging van persistentieobjecten |
+| Geen ransomware | Geen encryptie, bestandswijziging of verwijdering |
+| EICAR | Alleen een afzonderlijk geautoriseerde antivirustest |
 
 ---
 
-## Tabel 3: Uitvoeringstijdlijn
+## 2. Autorisatie en scope
 
-Geschatte tijden bij start om **09:00**. Realistisch totaal: **7-9 minuten** op een niet-domein-gekoppelde machine. Fase 9 is de voornaamste variabele; op een domein-gekoppelde machine tot 09:15 rekenen. De agent schrijft `elapsed_seconds` per event naar `%TEMP%\purpleteam_python_<stamp>.json` voor exacte nacalculatie.
+Voor uitvoering zijn twee verplichte parameters vereist:
 
-| Fase | Verwachte start | Verwachte stop | Opmerkingen |
-|------|----------------|---------------|-------------|
-| 0 – Omgevingsdetectie | 09:00 | 09:01 | Controleer vóór aanvang of Sysmon actief is en SIEM-ingest werkt; blue team op post; als agent hier stopt is er geen PowerShell beschikbaar |
-| 1 – Systeem- en omgevingsprofiel | 09:01 | 09:02 | `systeminfo` is traagst (~10-15 sec); basislijn vastleggen voor vergelijking achteraf; Get-MpComputerStatus hier bevat handtekeningsdatum, die in fase 11 ontbreekt |
-| 2 – Account- en bevoegdheidsinventarisatie | 09:02 | 09:03 | Snelste fase; alle commando's < 2 seconden; verwacht EID 4798/4799 in Security event log |
-| 3 – Proces-, service- en beveiligingsproductverkenning | 09:03 | 09:04 | Controleer achteraf of EDR de volledige procesketen ziet: `python.exe` → `cmd.exe`/`powershell.exe` → `tasklist.exe`/`sc.exe` |
-| 4 – Gevoelige bestandsopsporing | 09:04 | 09:05 | Runtime varieert sterk op basis van grootte USERPROFILE; op machines met veel bestanden kan dit 1-2 minuten extra kosten |
-| 5 – Credential-toegang verkenning | 09:05 | 09:06 | **Coördinatie vereist** vóór uitvoering; LSASS-aanwezigheidscheck kan EDR-alert of incident response triggeren; blue team expliciet informeren; geen geheimen worden gelezen |
-| 6 – Verdedigings- en beleidsverkenning | 09:06 | 09:07 | Vergelijk ExclusionPath uit Get-MpPreference met bekende baseline; onverwachte uitzonderingspaden direct documenteren; AppLocker-output leeg = geen beleid actief |
-| 7 – Netwerk- en laterale verplaatsingsverkenning | 09:07 | 09:08 | `nltest` genereert DC-verkeer; netwerkteam en SOC vooraf informeren; `netstat -ano` kan traag zijn op machines met veel verbindingen |
-| 8 – Verzameling en staging | 09:08 | 09:09 | Staging manifest staat in `%TEMP%\purpleteam_collection_manifest_<stamp>\manifest.txt`; controleer of dit zichtbaar is als Sysmon EID 11 in SIEM; Get-Clipboard geeft "not accessible" als functie geblokkeerd is — documenteer dit |
-| 9 – Persistentiemechanisme-verkenning | 09:09 | 09:11 | **Voornaamste bottleneck**; `schtasks /query /fo LIST /v` en `wmic service get PathName` zijn elk tot 30-60 sec; op domein-gekoppelde machine tot 09:13 rekenen; verhoog `TIMEOUT_SECONDS` van 30 naar 60 in de broncode indien commando's afgebroken worden |
-| 10 – Impact-simulatie (omkeerbaar) | 09:11 | 09:12 | **Hoogste risico op vals-positief incident response**; impact_simulation() loopt vóór de VSS-queries; blue team en SOC expliciet briefen; voer `python agent.py --decrypt` of `--cleanup` uit direct na afloop van de oefening; vastleggen in change record |
-| 11 – EICAR AV-detectietest | 09:12 | 09:13 | eicar_test() loopt vóór de PS-validatiequeries; controleer AV-beheerconsole na afloop op quarantaine-events; documenteer welke extensies geblokkeerd werden en welke niet; bij nul verwijderingen: real-time protection en IoavProtection controleren via stap 2-uitvoer |
+| Parameter | Beschrijving |
+|---|---|
+| `--authorized-host` | De expliciet goedgekeurde hostnaam |
+| `--authorized-location` | De door de operator opgegeven uitvoeringslocatie |
+
+De agent vergelijkt de opgegeven hostnaam met de lokale hostnaam.
+
+De locatie wordt als operatorverklaring geregistreerd en wordt niet onafhankelijk via GPS of geolocatie geverifieerd.
+
+### Scopebeperkingen
+
+| Onderdeel | Toegestaan |
+|---|---|
+| Lokale hostvalidatie | Ja |
+| Lokale systeeminformatie | Ja |
+| Metadata-inspectie binnen goedgekeurde map | Ja |
+| Externe host discovery | Nee |
+| Remote command execution | Nee |
+| Remote shares | Nee |
+| Laterale beweging | Nee |
+| Automatische host-pivoting | Nee |
+| Toegang tot andere hosts | Alleen na afzonderlijke autorisatie en in een toekomstige goedgekeurde implementatie |
+
+Het ontdekken van een andere host betekent nooit automatisch dat toegang tot die host is toegestaan.
+
+---
+
+## 3. Overzicht van de 12 fasen
+
+| Fase | Naam | Doel | Beperking |
+|---|---|---|---|
+| 0 | Host- en scopevalidatie | Controleren van host en uitvoeringslocatie | Verplichte autorisatie |
+| 1 | Systeemprofilering | Basisinformatie over het besturingssysteem | Read-only |
+| 2 | Account- en domeinvalidatie | Controleren van domeinomgevingsmetadata | Read-only |
+| 3 | Proces- en servicevalidatie | Proces- en servicecontroles | Niet geïmplementeerd |
+| 4 | Bestandsmetadatavalidatie | Namen en metadata controleren | Geen inhoud uitlezen |
+| 5 | Credential-store-controle | Aanwezigheid van bekende opslaglocaties controleren | Geen extractie |
+| 6 | Securityconfiguratievalidatie | Beveiligingsconfiguraties controleren | Niet geïmplementeerd |
+| 7 | Netwerkscopevalidatie | Bevestigen van de lokale scope | Geen netwerkverkenning |
+| 8 | Synthetische collectievalidering | Testen met synthetische gegevens | Geen echte dataverzameling |
+| 9 | Persistentieconfiguratievalidatie | Bestaande persistentie controleren | Niet geïmplementeerd |
+| 10 | Synthetische impactvalidatie | Impactscenario met testgegevens voorbereiden | Geen echte bestanden wijzigen |
+| 11 | Antivirusdetectievalidatie | Antivirusdetectie documenteren | Geen automatische EICAR-aanmaak |
+
+---
+
+## 4. Fasebeschrijvingen
+
+### Fase 0 — Host- en scopevalidatie
+
+**Doel:** Bevestigen dat de agent op de goedgekeurde host wordt uitgevoerd.
+
+| Controle | Beschrijving |
+|---|---|
+| Hostnaam | Vergelijking met de goedgekeurde hostnaam |
+| Locatie | Registratie van de opgegeven uitvoeringslocatie |
+| Autorisatie | Verplichte parameters controleren |
+| Remote toegang | Niet toegestaan |
+| Privilege escalation | Niet uitgevoerd |
+
+**Verwacht resultaat:** De uitvoering wordt alleen voortgezet wanneer de hostnaam overeenkomt.
+
+### Fase 1 — Systeemprofilering
+
+**Doel:** Basisinformatie over het lokale systeem verzamelen.
+
+| Controle | Beschrijving |
+|---|---|
+| Operating system | Besturingssysteem |
+| OS release | Versie van het besturingssysteem |
+| Architecture | Systeemarchitectuur |
+| Python runtime | Python-versie |
+| Systeeminventaris | Niet uitgevoerd |
+| Configuratiewijzigingen | Niet toegestaan |
+
+**Beperking:** Alleen basisinformatie wordt geregistreerd. Er worden geen gevoelige configuraties geëxporteerd.
+
+### Fase 2 — Account- en domeinvalidatie
+
+**Doel:** Basisinformatie over de domeinomgeving controleren.
+
+| Controle | Beschrijving |
+|---|---|
+| Domeinomgevingsvariabelen | Aanwezigheid controleren |
+| Domeinnaam | Registreren indien beschikbaar |
+| Accountinventaris | Niet uitgevoerd |
+| Wachtwoorden | Niet uitlezen |
+| Credentials | Niet verzamelen |
+| Accountwijzigingen | Niet toegestaan |
+| Groepswijzigingen | Niet toegestaan |
+
+**Beperking:** De huidige implementatie voert geen volledige Active Directory-enumeratie uit.
+
+### Fase 3 — Proces- en servicevalidatie
+
+**Doel:** Proces- en servicevalidatie binnen de endpointomgeving.
+
+| Controle | Status |
+|---|---|
+| Procesinventaris | Niet geïmplementeerd |
+| Service-inventaris | Niet geïmplementeerd |
+| Procesgeheugen uitlezen | Niet toegestaan |
+| Proceswijzigingen | Niet toegestaan |
+| Servicewijzigingen | Niet toegestaan |
+
+**Resultaat:** De fase wordt als `SKIPPED` gerapporteerd.
+
+### Fase 4 — Bestandsmetadatavalidatie
+
+**Doel:** Beperkte zichtbaarheid verkrijgen in bestandsnamen en metadata binnen een expliciet goedgekeurde map.
+
+| Controle | Beschrijving |
+|---|---|
+| Bestandsnaam | Toegestaan |
+| Bestandsextensie | Toegestaan |
+| Bestandsgrootte | Toegestaan |
+| Laatste wijzigingsdatum | Toegestaan |
+| Bestandsinhoud | Niet toegestaan |
+| Documentinhoud | Niet toegestaan |
+| Secrets uitlezen | Niet toegestaan |
+| Bestanden kopiëren | Niet toegestaan |
+| Bestanden verzamelen | Niet toegestaan |
+| Staging | Niet toegestaan |
+
+**Technische beperkingen:**
+
+| Parameter | Waarde |
+|---|---|
+| Maximale traversaldiepte | 3 niveaus |
+| Maximaal aantal resultaten | 100 |
+| Symlinks volgen | Nee |
+| Scanroot | Expliciet opgeven |
+| Bestandstoegang | Alleen metadata |
+
+De scanroot moet vooraf door de systeemeigenaar zijn goedgekeurd.
+
+### Fase 5 — Credential-store-controle
+
+**Doel:** Alleen controleren of bekende credential-store-locaties aanwezig zijn.
+
+| Controle | Beschrijving |
+|---|---|
+| Bekende opslaglocaties | Aanwezigheidscontrole |
+| Browsercredentialdatabases | Geen inhoud uitlezen |
+| Wachtwoorden | Geen toegang |
+| Tokens | Geen toegang |
+| LSASS-geheugen | Geen toegang |
+| Memory dumps | Niet toegestaan |
+| Credential-extractie | Niet toegestaan |
+
+**Resultaat:** Alleen de aanwezigheid van vooraf bekende paden wordt geregistreerd.
+
+### Fase 6 — Securityconfiguratievalidatie
+
+**Doel:** Beveiligingsconfiguraties controleren via goedgekeurde read-only interfaces.
+
+| Controle | Status |
+|---|---|
+| Security policies | Niet geïmplementeerd |
+| Configuratie-export | Niet uitgevoerd |
+| Configuratiewijzigingen | Niet toegestaan |
+| Defender-configuratie | Niet geïmplementeerd |
+| Firewallwijzigingen | Niet toegestaan |
+
+**Resultaat:** De fase wordt als `SKIPPED` gerapporteerd.
+
+### Fase 7 — Netwerkscopevalidatie
+
+**Doel:** Bevestigen dat de agent binnen de lokale uitvoeringsscope blijft.
+
+| Controle | Beschrijving |
+|---|---|
+| Lokale scope | Bevestigen |
+| Netwerkscanning | Niet uitgevoerd |
+| Port scanning | Niet uitgevoerd |
+| DNS-verkenning | Niet uitgevoerd |
+| Remote shares | Niet toegestaan |
+| Remote commands | Niet toegestaan |
+| Laterale beweging | Niet toegestaan |
+| Automatische host-pivoting | Niet toegestaan |
+
+**Expliciete toestemming:**
+
+Een gevonden host, domeinrelatie of netwerkresource geeft geen toestemming om deze te benaderen.
+
+Een eventuele toekomstige uitbreiding naar andere hosts vereist afzonderlijke expliciete autorisatie, inclusief hostidentificatie en toegestane testactiviteiten.
+
+### Fase 8 — Synthetische collectievalidering
+
+**Doel:** Een gecontroleerd collectiescenario voorbereiden met uitsluitend synthetische gegevens.
+
+| Controle | Beschrijving |
+|---|---|
+| Synthetische testdata | Toegestaan |
+| Echte bestanden | Niet verzamelen |
+| E-mailarchieven | Geen toegang |
+| Downloads | Niet verzamelen |
+| Clipboard uitlezen | Niet toegestaan |
+| Clipboard wijzigen | Niet automatisch toegestaan |
+| Stagingdirectory | Niet toegestaan |
+| Businessgegevens | Niet gebruiken |
+
+**Testmarker:**
+
+`PURPLE_TEAM_TEST_DATA`
+
+De synthetische gegevens blijven uitsluitend in het geheugen.
+
+Er worden geen bestaande clipboardgegevens gelezen of overschreven.
+
+### Fase 9 — Persistentieconfiguratievalidatie
+
+**Doel:** Bestaande persistentieconfiguraties kunnen controleren zonder wijzigingen uit te voeren.
+
+| Onderdeel | Beschrijving |
+|---|---|
+| Registry Run Keys | Niet geïmplementeerd |
+| Scheduled Tasks | Niet geïmplementeerd |
+| Services | Niet geïmplementeerd |
+| Startup folders | Niet geïmplementeerd |
+| WMI subscriptions | Niet geïmplementeerd |
+| Nieuwe persistentie | Niet toegestaan |
+| Bestaande persistentie wijzigen | Niet toegestaan |
+
+**Resultaat:** De fase wordt als `SKIPPED` gerapporteerd.
+
+### Fase 10 — Synthetische impactvalidatie
+
+**Doel:** Een impactscenario voorbereiden met uitsluitend synthetische testgegevens.
+
+| Testgegevens | Beschrijving |
+|---|---|
+| Finance | Synthetisch financieel testrecord |
+| HR | Synthetisch HR-testrecord |
+| Operations | Synthetisch operationeel testrecord |
+
+**Beperkingen:**
+
+| Activiteit | Toegestaan |
+|---|---|
+| Synthetische gegevens in geheugen | Ja |
+| Echte documenten uitlezen | Nee |
+| Bestanden encrypten | Nee |
+| Bestanden hernoemen | Nee |
+| Ransom notes aanmaken | Nee |
+| Bestanden verwijderen | Nee |
+| Productiedata wijzigen | Nee |
+| Decryptie uitvoeren | Nee |
+
+De fase valideert uitsluitend het synthetische testscenario en voert geen daadwerkelijke ransomware- of recoverytest uit.
+
+### Fase 11 — Antivirusdetectievalidatie
+
+**Doel:** De antivirusvalidatieprocedure documenteren.
+
+EICAR is een gestandaardiseerde antivirustestsignatuur. Het is geen functionerend virus, ransomware of uitvoerbare malwarepayload.
+
+| Onderdeel | Beschrijving |
+|---|---|
+| EICAR-bestand automatisch aanmaken | Niet toegestaan |
+| Antivirusinstellingen wijzigen | Niet toegestaan |
+| Antivirus uitschakelen | Niet toegestaan |
+| Quarantaine wijzigen | Niet toegestaan |
+| Antivirusdetectie claimen | Niet toegestaan zonder testresultaat |
+| Afzonderlijk geautoriseerde EICAR-test | Mogelijk volgens goedgekeurde procedure |
+
+**Belangrijk:** Antivirusproducten kunnen een EICAR-testbestand detecteren, blokkeren of in quarantaine plaatsen. EICAR is daarom niet volledig zonder operationele impact.
+
+De huidige implementatie maakt geen EICAR-bestand aan en rapporteert `NOT_PERFORMED`.
+
+---
+
+## 5. Logging en rapportage
+
+De agent genereert twee rapporten.
+
+| Bestand | Doel |
+|---|---|
+| JSON | Machineleesbaar overzicht |
+| HTML | Visueel rapport voor analyse |
+
+Standaard uitvoermap:
+
+`./purple_team_reports/`
+
+### Rapportinhoud
+
+| Veld | Beschrijving |
+|---|---|
+| Agentversie | Versie van de agent |
+| Timestamp | Tijdstip van uitvoering |
+| Phase ID | Fasenummer |
+| Phase name | Fasebeschrijving |
+| Status | Resultaat van de controle |
+| Message | Korte toelichting |
+| Metadata | Beperkte niet-gevoelige informatie |
+
+Rapporten moeten worden behandeld volgens het informatieclassificatiebeleid van de organisatie.
+
+Een gegenereerd rapport bewijst niet automatisch dat een beveiligingsproduct een detectie of alert heeft gegenereerd.
+
+---
+
+## 6. Installatie
+
+### Vereisten
+
+| Component | Vereiste |
+|---|---|
+| Python | 3.10 of hoger |
+| Dependencies | Python standard library |
+| Externe packages | Niet vereist |
+| Platform | Python-compatibele omgeving |
+
+### Repository ophalen
+
+```bash
+git clone https://github.com/zeno-b/purple-team-v4.git
+cd purple-team-v4
+```
+
+---
+
+## 7. Uitvoering
+
+### Alle fasen uitvoeren
+
+```bash
+python agent.py \
+  --all \
+  --authorized-host HOSTNAME \
+  --authorized-location APPROVED_LOCATION
+```
+
+### Geselecteerde fasen uitvoeren
+
+```bash
+python agent.py \
+  --phase 0,1,2,4,7,8,10,11 \
+  --authorized-host HOSTNAME \
+  --authorized-location APPROVED_LOCATION
+```
+
+### Metadata-inspectie uitvoeren
+
+```bash
+python agent.py \
+  --phase 0,4 \
+  --authorized-host HOSTNAME \
+  --authorized-location APPROVED_LOCATION \
+  --metadata-root "C:\Approved\TestDirectory"
+```
+
+### Alternatieve rapportmap
+
+```bash
+python agent.py \
+  --all \
+  --authorized-host HOSTNAME \
+  --authorized-location APPROVED_LOCATION \
+  --output "./reports"
+```
+
+Vervang `HOSTNAME` en `APPROVED_LOCATION` door de daadwerkelijk goedgekeurde waarden.
+
+De metadata-scanroot moet afzonderlijk zijn goedgekeurd.
+
+---
+
+## 8. Statuscodes
+
+| Status | Betekenis |
+|---|---|
+| PASS | De geïmplementeerde controle is uitgevoerd |
+| SKIPPED | De fase is niet geïmplementeerd of niet van toepassing |
+| ERROR | Er is een uitvoeringsfout opgetreden |
+| NOT_PERFORMED | De test is gedocumenteerd maar niet uitgevoerd |
+
+Een `PASS` betekent niet dat het systeem volledig veilig is.
+
+Het betekent uitsluitend dat de betreffende controle succesvol is uitgevoerd.
+
+---
+
+## 9. Veiligheidsgrenzen
+
+De huidige Python-implementatie bevat geen functionaliteit voor:
+
+| Functionaliteit | Status |
+|---|---|
+| Shell-command execution | Niet aanwezig |
+| PowerShell-command execution | Niet aanwezig |
+| Netwerkcommunicatie | Niet aanwezig |
+| Remote-host pivoting | Niet aanwezig |
+| Credential harvesting | Niet aanwezig |
+| Memory dumping | Niet aanwezig |
+| Echte dataverzameling | Niet aanwezig |
+| Bestandsextractie | Niet aanwezig |
+| Clipboardtoegang | Niet aanwezig |
+| Persistentie aanmaken | Niet aanwezig |
+| Ransomware-encryptie | Niet aanwezig |
+| Bestandsverwijdering | Niet aanwezig |
+| Automatische EICAR-aanmaak | Niet aanwezig |
+
+Fase 4 leest uitsluitend metadata binnen de opgegeven scanroot en de vastgelegde grenzen.
+
+Het genereren van rapporten schrijft JSON- en HTML-bestanden naar de opgegeven uitvoermap.
+
+Deze veiligheidsverklaringen gelden uitsluitend voor de Python 6.0-implementatie.
+
+---
+
+## 10. Implementatiestatus
+
+| Bestand | Status | Opmerking |
+|---|---|---|
+| `agent.py` | Referentie-implementatie | Python 6.0 |
+| `agent.ps1` | Legacy | Moet afzonderlijk worden aangepast |
+| `agent.sh` | Legacy | Moet afzonderlijk worden aangepast |
+| `README.md` | Nieuwe documentatie | Beschrijft Python 6.0 |
+
+De PowerShell- en Bash-implementaties mogen niet als conform aan dit veiligheidsmodel worden beschouwd voordat ze afzonderlijk zijn herschreven en getest.
+
+---
+
+## 11. Beperkingen
+
+De huidige versie biedt bewust geen:
+
+- Volledige Active Directory-enumeratie.
+- Proces- en service-inventaris.
+- Export van security policies.
+- Persistentie-inventaris.
+- Netwerkverkenning.
+- Actieve adversary emulation.
+- Endpoint detection rule execution.
+- Daadwerkelijke ransomware-simulatie.
+- Geautomatiseerde antivirustest.
+
+Deze beperkingen zijn bewust ingevoerd om de operationele impact te beperken.
+
+De prioriteit ligt bij gecontroleerde validatie, gegevensminimalisatie en veiligheid.
+
+---
+
+## 12. Verantwoord gebruik
+
+Gebruik deze agent uitsluitend op systemen waarvoor expliciete toestemming is verkregen.
+
+Breid de uitvoeringsscope niet uit zonder aanvullende goedkeuring.
+
+De aanwezigheid van een host, account, bestand of netwerkresource betekent niet dat toegang daartoe is toegestaan.
+
+Iedere toekomstige uitbreiding moet het niet-destructieve veiligheidsmodel behouden.
+
+**Kernprincipe: iedere veiligheidsbeperking die in deze README wordt beschreven, moet technisch door de implementatie worden afgedwongen.**
