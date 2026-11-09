@@ -1,136 +1,6 @@
-# Purple Team v4 → Safe Python 6.0
 
-Dit repository bevat de herimplementatie van de Purple Team-agent als een
-**niet-destructief, read-only validatieraamwerk** in Python 3.10+.
-
-- **Versie:** 6.0
-- **Doelbestanden:** `agent.py` (volledig herschreven) en `README.md` (dit bestand).
-- **Legacy, niet geaudit voor 6.0:** `agent.ps1` en `agent.sh`. Deze zijn
-  **ongewijzigd** gelaten en voldoen **niet** aan de 6.0-veiligheidsarchitectuur.
-  Gebruik ze niet in een 6.0-oefening.
-
-
-## 1. Autorisatievereisten
-
-Verplicht voor elke uitvoering van `agent.py`:
-
-- `--authorized-host HOST` — hostnaam waarvoor de oefening is goedgekeurd.
-  Wordt hoofdletterongevoelig vergeleken met `socket.gethostname()`.
-- `--authorized-location LOC` — door de operator opgegeven locatietekst.
-  Wordt geregistreerd als **operatorverklaring**, niet als geolocatie.
-  Het rapport vermeldt `location_verified: false`.
-
-Ontbrekende of niet-overeenkomende parameters → exit 1 (respectievelijk exit 2
-bij ontbrekende parameters). Fase 0 draait altijd eerst; bij falen wordt geen
-andere fase uitgevoerd.
-
-## 2. Installatie en gebruik
-
-Vereisten: Python 3.10+, alleen de standaardbibliotheek.
-
-```bash
-python -m py_compile agent.py
-python agent.py --list
-python agent.py --authorized-host "$(hostname)" --authorized-location "lab-01" --all
-python agent.py --authorized-host "$(hostname)" --authorized-location "lab-01" \
-                --phase 4 --scan-root /tmp/fixtures
-python agent.py --selftest
-```
-
-CLI-argumenten: `--authorized-host`, `--authorized-location`, `--all`,
-`--phase`, `--scan-root`, `--report-dir`, `--max-depth`, `--max-results`,
-`--max-dir-items`, `--list`, `--selftest`.
-
-`--all` en `--phase` zijn wederzijds exclusief. Ongeldige, dubbele of
-onbekende fase-selecties worden vóór uitvoering geweigerd (exit 2).
-
-## 3. Fasenoverzicht 6.0
-
-Dit is de **enige bindende beschrijving** van wat `agent.py` 6.0 doet.
-
-| Fase | Naam | Status in 6.0 | Wat de code doet |
-|------|------|---------------|------------------|
-| 0 | Host & Location Validation | PASS of ERROR | Vergelijkt `socket.gethostname()` met `--authorized-host`; registreert `--authorized-location` als operatorverklaring. Stopt bij mismatch. |
-| 1 | System Profiling | PASS | Leest `platform.system/release/machine/python_version/python_implementation`. Read-only. |
-| 2 | Account & Domain Validation | SKIPPED | Niet geïmplementeerd. Geen credential- of directory-API aangeroepen. |
-| 3 | Process & Service Validation | SKIPPED | Niet geïmplementeerd. Geen proces- of service-API aangeroepen. |
-| 4 | File Metadata Validation | PASS of SKIPPED of ERROR | Vereist `--scan-root`. Verzamelt uitsluitend `name`, `extension`, `size`, `mtime` via `os.scandir(follow_symlinks=False)` en `entry.stat(follow_symlinks=False)`. Respecteert diepte-, resultaat- en directory-itemlimieten. Onvolledige scan → `ERROR`, nooit `PASS`. |
-| 5 | Credential Store Validation | PASS of SKIPPED | `lstat()` op vijf vooraf gedefinieerde paden. Rapporteert `PRESENT` / `ABSENT` / `UNKNOWN`; toegangsfouten worden **nooit** als `ABSENT` gemeld. |
-| 6 | Security Configuration Validation | SKIPPED | Niet geïmplementeerd. Geen register-, firewall- of Defender-API aangeroepen. |
-| 7 | Network Scope Validation | PASS | Declaratief. Meldt `remote_connections_made: 0`. Geen socket, geen DNS, geen pivot. |
-| 8 | Synthetic Collection Validation | PASS | Bouwt drie in-memory records met marker `PURPLE_TEAM_TEST_DATA`. `clipboard_accessed: false`, `staging_created: false`. |
-| 9 | Persistence Validation | SKIPPED | Niet geïmplementeerd. Geen Run-key, task, service, WMI- of startupwijziging. |
-| 10 | Synthetic Impact Validation | PASS | Bouwt vijf in-memory records met `SYNTHETIC_*_RECORD`-markers. `files_touched: 0`, `encryption_performed: false`, `deletion_performed: false`. |
-| 11 | Antivirus Validation | NOT_PERFORMED | Legt uit wat EICAR is. Creëert en voert **geen** EICAR-bestand uit. `detection_claimed: false`. |
-
-Statuswaarden: `PASS`, `SKIPPED`, `ERROR`, `NOT_PERFORMED`.
-Aanvullend in fase 5: `PRESENT`, `ABSENT`, `UNKNOWN`.
-
-## 4. Wat 6.0 expliciet niet doet
-
-Technisch afwezig in `agent.py`:
-
-- Geen `subprocess`, geen shell, geen `os.system`.
-- Geen netwerkverbindingen (`socket.connect`, `urllib`, HTTP).
-- Geen bestandsinhoud gelezen.
-- Geen symlinks gevolgd (scanroot, traversal, rapportdoel).
-- Geen credential stores geopend.
-- Geen clipboard gelezen of gewijzigd.
-- Geen persistentie aangemaakt of gewijzigd.
-- Geen bestand versleuteld, hernoemd of verwijderd.
-- Geen EICAR-bestand aangemaakt of uitgevoerd.
-- Geen eventlog gewist.
-- Geen antivirus- of firewallinstelling gewijzigd.
-- Geen privileges geëscaleerd.
-
-## 5. Rapportage
-
-Twee bestanden per run, in `--report-dir` of OS-temp:
-
-- `purpleteam_<run_id>.json`
-- `purpleteam_<run_id>.html`
-
-Beide worden met `O_CREAT | O_EXCL` aangemaakt. Bestaande bestanden worden
-**nooit** overschreven. Symlink-doelen worden geweigerd. De rapportmap moet
-bestaan, mag geen symlink zijn en moet een map zijn.
-
-Rapportvelden: agentnaam, versie, run-id, generatie- en starttijdstip, duur,
-geautoriseerde hostnaam, operator-declared location (`location_verified: false`),
-en per fase: nummer, naam, status, tijdstip, bericht, per-check resultaten en
-niet-gevoelige metadata.
-
-Verboden in rapporten: wachtwoorden, tokens, cookies, clipboardinhoud,
-documentinhoud, geheugeninhoud en onnodige persoonlijke gegevens.
-
-## 6. Testen
-
-```bash
-python agent.py --selftest
-```
-
-De self-test controleert in een geïsoleerde tijdelijke map dat fase 4 geen
-bestandsinhoud leest, geen symlinks volgt en een filesystem-root weigert;
-dat fase 5 `UNKNOWN` (niet `ABSENT`) rapporteert bij toegangsproblemen;
-dat fase 8 het clipboard niet aanraakt; dat fase 9 `SKIPPED` is; dat fase 10
-geen bestanden aanmaakt, versleutelt of verwijdert; dat fase 11 `NOT_PERFORMED`
-is en geen EICAR-bestand creëert; en dat de CLI-guards correct reageren op
-ontbrekende autorisatie, ongeldige fasen en een verkeerde host.
-
-## 7. Legacy PowerShell en Bash
-
-`agent.ps1` en `agent.sh` zijn **niet** bijgewerkt voor 6.0 en zijn **niet
-geaudit** tegen de 6.0-veiligheidsarchitectuur. Ze bevatten functionaliteit
-die in 6.0 verboden is (credential-verkenning, clipboard-toegang, staging,
-ransomware-simulatie, automatische EICAR-generatie). Ze worden uitsluitend
-als historisch referentiemateriaal bewaard. Gebruik ze niet in een
-6.0-oefening.
-
----
 
 ## Tabel 1: Doelstellingen
-
-> Oorspronkelijke v4/v5-tabel, hier **ongewijzigd** opgenomen als historische
-> referentie. Zie §3 en §4 voor wat 6.0 feitelijk doet.
 
 | Obj ID | Fase | Beschrijving doelstelling | Bewijs van compromittering | Kroonjuweel |
 |--------|------|--------------------------|---------------------------|-------------|
@@ -150,10 +20,6 @@ als historisch referentiemateriaal bewaard. Gebruik ze niet in een
 
 ## Tabel 2: Aanvalsplaybook
 
-> Oorspronkelijke v4/v5-tabel, hier **ongewijzigd** opgenomen als historische
-> referentie. De MITRE ATT&CK-ID's in deze tabel verwijzen naar technieken uit
-> de **oude playbook**; 6.0 voert deze technieken niet uit (zie §3 en §4).
-
 | Fase | Actie | Beschrijving (uitvoering in volgorde) | MITRE ATT&CK ID | Opmerkingen | Verwachte detectie |
 |------|-------|--------------------------------------|-----------------|-------------|-------------------|
 | 0 | Omgevingsdetectie | (1) Controleer `platform.system()` voor Windows runtime; (2) Zoek PowerShell-binary via `shutil.which` op powershell.exe, powershell, pwsh.exe, pwsh; (3) Print PowerShell-pad en `SIM_DIR`-locatie. Agent stopt met exit 1 als noch Windows noch pwsh gevonden wordt | T1082 | Geen externe commando's uitgevoerd; puur Python platform-detectie; uitkomst bepaalt welke commando's in latere fasen worden overgeslagen | Procescreatie: `python.exe` (Sysmon EID 1); logbestand aangemaakt in `%TEMP%` (Sysmon EID 11) |
@@ -172,9 +38,6 @@ als historisch referentiemateriaal bewaard. Gebruik ze niet in een
 ---
 
 ## Tabel 3: Uitvoeringstijdlijn
-
-> Oorspronkelijke v4/v5-tabel, hier **ongewijzigd** opgenomen als historische
-> referentie. De tijden hieronder gelden voor de oude agent en **niet** voor 6.0.
 
 Geschatte tijden bij start om **09:00**. Realistisch totaal: **7-9 minuten** op een niet-domein-gekoppelde machine. Fase 9 is de voornaamste variabele; op een domein-gekoppelde machine tot 09:15 rekenen. De agent schrijft `elapsed_seconds` per event naar `%TEMP%\purpleteam_python_<stamp>.json` voor exacte nacalculatie.
 
