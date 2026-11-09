@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """
-
 Usage:
-    python agent.py [--all] [--phase N[,N]] [--decrypt] [--cleanup]
-    python agent.py --report-only   # Re-generate HTML from last JSON log
+    python agent.py [--all] [--phase N[,N]] [--list] [--quiet] [--report]
+    python agent.py --consent [--pivot-host HOST]   # explicit consent: pivot demo (P7) + reversible tests DT-004/005/006 (P12)
+    python agent.py --decrypt                       # decrypt Phase 11 ransomware simulation (test data only)
+    python agent.py --cleanup                       # remove all simulation artifacts (ransom sim, LOLBAS demo, EICAR)
+
+Exercise guardrails (README, fases 0-11):
+    P1/P3/P6  read-only        |  P4 metadata only  |  P5 no extraction/dumping
+    P7        network recon only — pivot requires --consent
+    P8        metadata-only collection — 'FALSE_TEST_DATA' placed on clipboard before reading
+    P9        persistence recon is read-only — nothing is written
+    P10/P11   test data only (LOLBAS demo + reversible ransomware sim in %TEMP%)
+    P12       EICAR safe AV test + reversible detection tests; DT-004/005/006 require --consent
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ from typing import Dict, List, Optional, Tuple
 # CONFIGURATION
 # ───────────────────────────────────────────────────────────────────────────
 
-SCRIPT_VERSION = "5.0-Py"
+SCRIPT_VERSION = "5.1-Py"
 
 PHASE_NAMES: Dict[str, str] = {
     "Phase 0":  "Env Detection",
@@ -42,11 +51,11 @@ PHASE_NAMES: Dict[str, str] = {
     "Phase 5":  "Credential Recon",
     "Phase 6":  "Defense Evasion",
     "Phase 7":  "Network Recon",
-    "Phase 8":  "Collection",
+    "Phase 8":  "Collection (Meta Only)",
     "Phase 9":  "Persistence Recon",
     "Phase 10": "LOLBAS Demo",
     "Phase 11": "Impact Simulation",
-    "Phase 12": "Detection Valid.",
+    "Phase 12": "Detection Valid. + EICAR",
 }
 TIMEOUT_SECONDS = 25
 MAX_WORKERS = 4
@@ -57,6 +66,31 @@ RANSOM_EXT = ".locked"
 RANSOM_MANIFEST = RANSOM_SIM_DIR / ".manifest"
 
 EICAR = r"X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*"
+EICAR_DIR = Path(os.environ.get("TEMP", "/tmp")) / "purpleteam_eicar"
+LOLBAS_DEMO_DIR = Path(os.environ.get("TEMP", "/tmp")) / "purpleteam_lolbas_demo"
+
+# Exercise consent: pivot actions (Phase 7) and the reversible detection tests
+# DT-004/005/006 (Phase 12) require explicit operator consent via --consent.
+CONSENT: bool = False
+PIVOT_HOST: str = ""
+
+# GUARDRAILS — printed at the start of every phase and written to the log so the
+# exercise constraints (README, fases 0-11) stay visible at runtime.
+GUARDRAILS: Dict[str, str] = {
+    "0":  "Host & location validation must pass before any other action",
+    "1":  "READ-ONLY — system profiling, no changes",
+    "2":  "NO CHANGES — domain enumeration is explicitly allowed",
+    "3":  "READ-ONLY — process/service/security-product discovery",
+    "4":  "FILE NAMES & METADATA ONLY — no file contents are read",
+    "5":  "NO EXTRACTION OR DUMPING — credential store presence checks only",
+    "6":  "READ-ONLY — defense & policy discovery",
+    "7":  "NETWORK RECON ONLY — pivot requires explicit consent (--consent)",
+    "8":  "NO REAL COLLECTION — metadata only; 'FALSE_TEST_DATA' placed on clipboard before reading",
+    "9":  "NO REAL PERSISTENCE — existing mechanisms are checked, nothing is written",
+    "10": "TEST DATA ONLY — benign LOLBAS artifacts in %TEMP%\\purpleteam_lolbas_demo",
+    "11": "TEST DATA ONLY — reversible ransomware simulation in %TEMP%\\purpleteam_ransom_sim",
+    "12": "EICAR (safe standard test string) + reversible detection tests; DT-004/005/006 require --consent",
+}
 
 # ───────────────────────────────────────────────────────────────────────────
 # LOLBAS CATALOGUE
@@ -431,9 +465,9 @@ class Logger:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.run_id = str(uuid.uuid4())[:8]
         base = Path(os.environ.get("TEMP", "/tmp"))
-        self.txt = base / f"purpleteam_{ts}_{self.run_id}.log"
-        self.json = base / f"purpleteam_{ts}_{self.run_id}.json"
-        self.html = base / f"purpleteam_{ts}_{self.run_id}.html"
+        self.txt = base / f"purpleteam_python_{ts}_{self.run_id}.log"
+        self.json = base / f"purpleteam_python_{ts}_{self.run_id}.json"
+        self.html = base / f"purpleteam_python_{ts}_{self.run_id}.html"
         self.events: List[Dict] = []
         self.findings: List[Finding] = []
         self.detection_results: List[DetectionResult] = []
@@ -449,7 +483,11 @@ class Logger:
             f.write("╚═══════════════════════════════════════════════════════════════════════╝\n\n")
             f.write(f" Run ID:       {self.run_id}\n")
             f.write(f" Start Time:   {datetime.now().strftime('%d/%m/%Y %H:%M:%S %Z')}\n")
-            f.write(f" Operator:     {os.getlogin() if hasattr(os, 'getlogin') else os.environ.get('USERNAME', 'unknown')}\n")
+            try:
+                operator = os.getlogin()
+            except Exception:
+                operator = os.environ.get("USERNAME", "unknown")
+            f.write(f" Operator:     {operator}\n")
             f.write(f" Hostname:     {os.environ.get('COMPUTERNAME', 'unknown')}\n")
             f.write(f" PID:          {os.getpid()}\n")
             f.write(f" Text Log:     {self.txt}\n")
@@ -692,6 +730,9 @@ def begin_phase(number: str, title: str, techniques: str, description: str) -> N
     print(f"{C.CYN}║{C.RS} {C.BD}PHASE {number}: {title}{C.RS}")
     print(f"{C.CYN}║{C.RS} {C.D}MITRE ATT&CK: {techniques}{C.RS}")
     print(f"{C.CYN}║{C.RS} {C.D}{description}{C.RS}")
+    guard = GUARDRAILS.get(number)
+    if guard:
+        print(f"{C.CYN}║{C.RS} {C.Y}GUARDRAIL:{C.RS} {C.Y}{guard}{C.RS}")
     print(f"{C.CYN}║{C.RS} {C.D}Started: {now} (elapsed: {el}){C.RS}")
     print(f"{C.CYN}╚══════════════════════════════════════════════════════════════════════╝{C.RS}")
     print()
@@ -699,6 +740,8 @@ def begin_phase(number: str, title: str, techniques: str, description: str) -> N
     log.write(0, f"══════════════════════════════════════════════════════════════════")
     log.write(0, f"PHASE {number}: {title}")
     log.write(0, f"Techniques: {techniques}")
+    if guard:
+        log.write(0, f"Guardrail: {guard}")
     log.write(0, f"Started: {now} (total elapsed: {el})")
     log.write(0, f"──────────────────────────────────────────────────────────────────")
     log.write(0, "")
@@ -866,6 +909,8 @@ def phase_accounts() -> None:
     exe.run("net", ["accounts"], "T1201", "Local password policy")
     exe.run("nltest", ["/domain_trusts"], "T1482", "Domain trusts")
     exe.run("nltest", ["/dclist:%USERDOMAIN%"], "T1018", "Domain controllers")
+    exe.cmd("net group /domain 2>nul", "T1069.002", "Domain groups")
+    exe.cmd('net group "Domain Admins" /domain 2>nul', "T1069.002", "Domain Admins members")
     exe.cmd("net accounts /domain 2>nul", "T1201", "Domain password policy")
     exe.run("qwinsta", [], "T1033", "Logged-on sessions")
 
@@ -1170,6 +1215,35 @@ def phase_network() -> None:
             detection="Event ID 91 (WinRM), Event ID 400/403 (PowerShell remoting)"))
         _find("MEDIUM", "WinRM running — PSRemoting available")
 
+    # ── Pivot demonstration — ONLY after explicit consent ─────────────────
+    if not CONSENT:
+        _info("Pivot DISABLED: no explicit consent (--consent). Network recon only.", "T1021")
+        log.write(4, "[GUARDRAIL] Phase 7 pivot actions disabled — no consent given")
+    else:
+        _warn("EXPLICIT CONSENT GRANTED (--consent) — pivot demonstration enabled", "T1021")
+        log.write(4, f"[CONSENT] Operator granted pivot consent (target: {PIVOT_HOST or 'readiness checks only'})")
+        log.json_event("CONSENT", "T1021", log.phase,
+                       "Pivot consent", "Explicit pivot consent provided via --consent", "")
+        if not PIVOT_HOST:
+            _warn("No --pivot-host given — pivot readiness checks only (no other host contacted)")
+            exe.run("nltest", ["/dclist:%USERDOMAIN%"], "T1018", "DC list (pivot candidates)")
+        else:
+            target = PIVOT_HOST
+            _warn(f"Pivot target: {target} (SMB/WinRM/RDP reachability + reversible IPC$ mount)", "T1021")
+            exe.ps(f"Test-NetConnection {target} -Port 445 -InformationLevel Quiet "
+                   f"-WarningAction SilentlyContinue", "T1046", f"SMB (445) reachable: {target}")
+            exe.ps(f"Test-NetConnection {target} -Port 5985 -InformationLevel Quiet "
+                   f"-WarningAction SilentlyContinue", "T1021.006", f"WinRM (5985) reachable: {target}")
+            exe.ps(f"Test-NetConnection {target} -Port 3389 -InformationLevel Quiet "
+                   f"-WarningAction SilentlyContinue", "T1021.001", f"RDP (3389) reachable: {target}")
+            r_mount = exe.cmd(f'net use \\\\{target}\\IPC$ /persistent:no', "T1021.002",
+                              f"Mount IPC$ share on {target} (reversible)")
+            if r_mount.success:
+                exe.cmd(f'net use \\\\{target}\\IPC$ /delete /y', "T1021.002",
+                        f"Unmount IPC$ share on {target} (cleanup)")
+            exe.run("winrs", [f"/r:{target}", "whoami"], "T1021.006",
+                    f"Remote identity via WinRM on {target}")
+
     end_phase()
 
 
@@ -1178,51 +1252,77 @@ def phase_network() -> None:
 # ───────────────────────────────────────────────────────────────────────────
 
 def phase_collection() -> None:
-    begin_phase("8", "Collection & Staging",
-                "T1119, T1005, T1074.001, T1114.001, T1113",
-                "Collect high-value documents, emails, and stage for exfiltration review")
+    begin_phase("8", "Collection & Staging (Metadata Only)",
+                "T1119, T1005, T1074.001, T1114.001, T1115",
+                "Catalogue high-value targets — metadata only; fake clipboard data; no real collection")
 
     base = Path(os.environ.get("TEMP", "/tmp"))
     collection_dir = base / f"collected_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     collection_dir.mkdir(parents=True, exist_ok=True)
+    manifest = collection_dir / "staging_manifest.json"
+    entries: List[Dict] = []
     exe.total += 1
-    _act(f"Staging directory: {collection_dir}")
+    _act(f"Staging manifest (metadata only): {manifest}")
+    log.write(8, "GUARDRAIL: metadata-only collection — no real files are copied "
+                 "(shutil.copy2 removed per exercise constraint)")
 
-    collected = 0
-    r = exe.cmd('dir "C:\\\\Users\\\\*\\\\Desktop\\\\*.txt" /s /b 2>nul', "T1074.001", "Collect text files")
+    def _catalog(line: str) -> None:
+        """Record path/size/mtime only — file contents are never read or copied."""
+        line = line.strip()
+        if not line:
+            return
+        try:
+            p = Path(line)
+            if p.exists():
+                st = p.stat()
+                entries.append({"path": str(p), "size_bytes": st.st_size,
+                                "modified": datetime.fromtimestamp(st.st_mtime).isoformat()})
+                log.write(8, f"[CATALOGUED] {line} ({st.st_size} bytes — metadata only, NOT copied)")
+        except Exception:
+            pass
+
+    r = exe.cmd('dir "C:\\\\Users\\\\*\\\\Desktop\\\\*.txt" /s /b 2>nul', "T1074.001",
+                "Discover desktop text files (metadata only)")
     if r.success and r.stdout:
-        for line in r.stdout.strip().split("\n")[:5]:
-            line = line.strip()
-            if line and Path(line).exists():
-                try:
-                    size = Path(line).stat().st_size
-                    if size < 10240:
-                        shutil.copy2(line, collection_dir)
-                        collected += 1
-                        log.write(8, f"[STAGED] {line} ({size} bytes)")
-                except Exception:
-                    pass
-
-    if collected > 0:
-        _ok(f"Staged {collected} files", "T1074.001")
-        log.add_finding(Finding(
-            "HIGH", "T1074.001", f"{collected} files staged to temp directory",
-            remediation="Monitor temp directories for bulk file staging; alert on robocopy/xcopy to temp",
-            detection="Event ID 4663 (Object Access) on bulk file copies to %TEMP%"))
-        _find("HIGH", f"{collected} files staged for exfiltration simulation")
-    else:
-        _info("No files staged")
-        exe.fail += 1
+        for line in r.stdout.strip().split("\n")[:10]:
+            _catalog(line)
 
     exe.cmd('dir "C:\\\\Users\\\\*\\\\*.pst" /s /b 2>nul && dir "C:\\\\Users\\\\*\\\\*.ost" /s /b 2>nul',
-            "T1114.001", "Email archives")
-    exe.ps("try { Set-Clipboard -Value 'FAKE CLIPBOARD CONTENTS' } "
-           "catch { Write-Output 'Unavailable' }", "T1115", "Clipboard contents")
-    exe.ps("try { Get-Clipboard -ErrorAction SilentlyContinue | Select-Object -First 5 } "
-           "catch { Write-Output 'Unavailable' }", "T1115", "Clipboard contents")
+            "T1114.001", "Email archives (metadata only)")
     exe.cmd(r'dir "C:\\\\Users\\\\*\\\\AppData\\\\Roaming\\\\Microsoft\\\\Office\\\\Recent" /b 2>nul',
-            "T1005", "Recent Office files")
-    exe.cmd(r'dir "C:\\\\Users\\\\*\\\\Downloads" /b 2>nul', "T1005", "Downloads folder")
+            "T1005", "Recent Office files (metadata only)")
+    exe.cmd(r'dir "C:\\\\Users\\\\*\\\\Downloads" /b 2>nul', "T1005", "Downloads folder (metadata only)")
+
+    # GUARDRAIL: fake test data is placed on the clipboard BEFORE any read —
+    # no real clipboard content is ever captured.
+    exe.ps("try { Set-Clipboard -Value 'FALSE_TEST_DATA' } "
+           "catch { Write-Output 'Unavailable' }", "T1115",
+           "Clipboard: place fake test data (Set-Clipboard)")
+    exe.ps("try { Get-Clipboard -ErrorAction SilentlyContinue | Select-Object -First 5 } "
+           "catch { Write-Output 'Unavailable' }", "T1115",
+           "Clipboard read-back (fake test data only)")
+
+    try:
+        manifest.write_text(json.dumps({
+            "note": "Metadata-only staging manifest — no files were copied (Phase 8 guardrail)",
+            "count": len(entries),
+            "files": entries,
+        }, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    exe.total += 1
+    if entries:
+        _ok(f"Catalogued {len(entries)} file(s) — metadata only, nothing copied", "T1074.001")
+        log.add_finding(Finding(
+            "HIGH", "T1074.001",
+            f"{len(entries)} files catalogued in staging manifest (metadata only — no copies)",
+            remediation="Monitor for metadata probing and staging manifests; alert on bulk file enumeration",
+            detection="Event ID 4663 (Object Access) enumeration of user file paths"))
+        _find("HIGH", f"{len(entries)} files catalogued (metadata only)")
+    else:
+        _info("No files catalogued")
+        exe.fail += 1
 
     end_phase()
 
@@ -1306,7 +1406,7 @@ def phase_lolbas() -> None:
                 "Demonstrate Living Off The Land abuse: encode, download, execute, hide")
 
     _warn("This phase creates benign artifacts to demonstrate LOLBAS abuse patterns")
-    demo_dir = Path(os.environ.get("TEMP", "/tmp")) / "purpleteam_lolbas_demo"
+    demo_dir = LOLBAS_DEMO_DIR
     demo_dir.mkdir(parents=True, exist_ok=True)
 
     # 10.1 certutil encode/decode (T1027)
@@ -1587,11 +1687,22 @@ def decrypt_simulation() -> None:
 
 def cleanup_simulation() -> None:
     _banner("PURPLE TEAM — SIMULATION CLEANUP")
-    if RANSOM_SIM_DIR.exists():
-        shutil.rmtree(RANSOM_SIM_DIR)
-        _ok(f"Removed: {RANSOM_SIM_DIR}")
-    else:
-        _info(f"Not found: {RANSOM_SIM_DIR}")
+    targets = [
+        ("Ransomware simulation (test data)", RANSOM_SIM_DIR),
+        ("LOLBAS demo artifacts (test data)", LOLBAS_DEMO_DIR),
+        ("EICAR test files (safe standard test string)", EICAR_DIR),
+    ]
+    for label, d in targets:
+        if d.exists():
+            shutil.rmtree(d)
+            _ok(f"Removed {label}: {d}")
+        else:
+            _info(f"Not found ({label}): {d}")
+    # Metadata-only staging manifests from Phase 8
+    base = Path(os.environ.get("TEMP", "/tmp"))
+    for d in sorted(base.glob("collected_data_*")):
+        shutil.rmtree(d, ignore_errors=True)
+        _ok(f"Removed staging manifest: {d}")
     print(); _ok("Cleanup complete")
 
 
@@ -1830,7 +1941,51 @@ def _dt_privilege_enum() -> Tuple[str, str]:
 
 # ── Ordered test manifest ───────────────────────────────────────────────────
 
+def _dt_eicar() -> Tuple[str, str]:
+    """Write the EICAR Standard Antivirus Test File string to %TEMP%\\purpleteam_eicar.
+
+    EICAR is SAFE: a 68-byte ASCII test string agreed on by antivirus vendors.
+    It contains no malicious code and cannot execute, replicate or cause harm —
+    it exists purely to validate the AV/EDR detection pipeline end-to-end.
+    Expected: AV detects + quarantines the files (Defender EventID 1116/1117).
+    """
+    try:
+        EICAR_DIR.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for name in ("eicar_testfile_1.txt", "eicar_testfile_2.txt", "eicar_testfile_3.txt"):
+            try:
+                (EICAR_DIR / name).write_text(EICAR, encoding="ascii")
+                written += 1
+            except Exception:
+                pass
+        if written == 0:
+            return "ERROR", "Could not write EICAR test files (write access denied)"
+        _info(f"EICAR is SAFE: industry-standard test string, no malicious code — "
+              f"{written} file(s) written to {EICAR_DIR}")
+        _info("Waiting 5s for real-time AV/EDR detection (BlockAtFirstSeen) ...")
+        time.sleep(5)
+        remaining = [p.name for p in EICAR_DIR.glob("*.txt") if p.exists()]
+        if not remaining:
+            return "BLOCKED", (f"AV removed/quarantined all {written} EICAR test file(s) — "
+                               "detection pipeline active (Defender EID 1116/1117)")
+        return "EXECUTED", (f"{len(remaining)}/{written} EICAR file(s) survived 5s — "
+                            "real-time protection may be off or a detection gap "
+                            "(verify Defender EID 1116/1117)")
+    except Exception as exc:
+        return "ERROR", f"EICAR test failed: {exc}"
+
+
 DETECTION_TESTS: List[Dict] = [
+    {
+        "id": "DT-000", "fn": _dt_eicar,
+        "name": "EICAR AV Detection (Safe)",
+        "technique": "AV-TEST",
+        "requires_consent": False,
+        "expected_events": [
+            "Defender EventID 1116 (malware detected) — EICAR test file",
+            "Defender EventID 1117 (action taken) — quarantine/remove",
+        ],
+    },
     {
         "id": "DT-001", "fn": _dt_lsass_handle,
         "name": "LSASS Handle Access",
@@ -1862,6 +2017,7 @@ DETECTION_TESTS: List[Dict] = [
         "id": "DT-004", "fn": _dt_run_key,
         "name": "Fake Malware Run Key",
         "technique": "T1547.001",
+        "requires_consent": True,
         "expected_events": [
             "Security EventID 4657 — ObjectName: HKCU\\\\CurrentVersion\\\\Run, new value created",
             "SIEM rule: Suspicious run key value pointing to %TEMP% or Windows\\\\Temp",
@@ -1871,6 +2027,7 @@ DETECTION_TESTS: List[Dict] = [
         "id": "DT-005", "fn": _dt_scheduled_task,
         "name": "Disguised Scheduled Task",
         "technique": "T1053.005",
+        "requires_consent": True,
         "expected_events": [
             "Security EventID 4698 (Task Created) — task under \\\\Microsoft\\\\Windows\\\\MUI",
             "Sysmon EventID 1 — schtasks.exe /create",
@@ -1880,6 +2037,7 @@ DETECTION_TESTS: List[Dict] = [
         "id": "DT-006", "fn": _dt_log_clear,
         "name": "Security Log Clear Attempt",
         "technique": "T1070.001",
+        "requires_consent": True,
         "expected_events": [
             "Security EventID 1102 if successful (admin path)",
             "Process creation of wevtutil cl Security — detectable even when blocked",
@@ -1919,10 +2077,11 @@ def _print_detection_report(results: List[DetectionResult], log_obj) -> None:
     print(f"{C.CYN}║{C.RS}{C.D}{hdr}{C.RS}{' '*(W-len(hdr))}{C.CYN}║{C.RS}")
     print(f"{C.CYN}╠{'─'*W}╣{C.RS}")
 
-    outcome_col = {"EXECUTED": C.R, "BLOCKED": C.G, "ERROR": C.Y}
+    outcome_col = {"EXECUTED": C.R, "BLOCKED": C.G, "ERROR": C.Y, "SKIPPED": C.D}
     executed = sum(1 for r in results if r.outcome == "EXECUTED")
     blocked  = sum(1 for r in results if r.outcome == "BLOCKED")
     errors   = sum(1 for r in results if r.outcome == "ERROR")
+    skipped  = sum(1 for r in results if r.outcome == "SKIPPED")
 
     for r in results:
         col = outcome_col.get(r.outcome, C.W)
@@ -1936,6 +2095,7 @@ def _print_detection_report(results: List[DetectionResult], log_obj) -> None:
     bl_col = C.G if blocked  > 0 else C.Y
     print(f"{C.CYN}║{C.RS}  {ex_col}EXECUTED (blue team should have alerted): {executed}/{len(results)}{C.RS}{' '*(W-46-len(str(executed))-len(str(len(results))))}{C.CYN}║{C.RS}")
     print(f"{C.CYN}║{C.RS}  {bl_col}BLOCKED  (control prevented execution)  : {blocked}/{len(results)}{C.RS}{' '*(W-46-len(str(blocked))-len(str(len(results))))}{C.CYN}║{C.RS}")
+    print(f"{C.CYN}║{C.RS}  {C.D}SKIPPED  (consent required, not run)    : {skipped}/{len(results)}{C.RS}{' '*(W-46-len(str(skipped))-len(str(len(results))))}{C.CYN}║{C.RS}")
     print(f"{C.CYN}╚{'═'*W}╝{C.RS}")
 
     # ── Terminal: per-test detail + expected events ────────────────────────
@@ -1977,6 +2137,7 @@ def _print_detection_report(results: List[DetectionResult], log_obj) -> None:
     log_obj.write(0, "")
     log_obj.write(0, f"  EXECUTED (needs blue team response): {executed}/{len(results)}")
     log_obj.write(0, f"  BLOCKED  (control active)          : {blocked}/{len(results)}")
+    log_obj.write(0, f"  SKIPPED  (consent required)        : {skipped}/{len(results)}")
     log_obj.write(0, "")
     log_obj.write(0, "  Detail:")
     for r in results:
@@ -2006,11 +2167,32 @@ def phase_detection_validation() -> None:
 
     _warn("All tests are reversible — artefacts created are immediately cleaned up")
     _warn("EXECUTED = TTP ran; blue team MUST have received an alert for this to be a pass")
+    if CONSENT:
+        _warn("Consent mode ON (--consent): DT-004/DT-005/DT-006 will make short, REAL, reversible system changes")
+    else:
+        _warn("Consent mode OFF: DT-004/DT-005/DT-006 will be SKIPPED (they require --consent)")
     print()
 
     for test in DETECTION_TESTS:
         exe.total += 1
         _act(f"{test['id']} — {test['name']}", test["technique"])
+
+        # GUARDRAIL: tests that make real (reversible) system changes require consent
+        if test.get("requires_consent") and not CONSENT:
+            detail = ("Requires explicit consent (--consent): makes short, real, "
+                      "reversible system changes — SKIPPED")
+            _warn(f"{test['id']} SKIPPED — explicit consent required (--consent)", test["technique"])
+            exe.skip += 1
+            log.write(4, f"[{_ts()}] [SKIPPED] {test['id']} {test['name']} | {test['technique']}")
+            log.write(8, f"Detail:  {detail}")
+            log.json_event("SKIPPED", test["technique"], log.phase,
+                           f"{test['id']} {test['name']}", detail, "")
+            log.detection_results.append(DetectionResult(
+                test_id=test["id"], test_name=test["name"], technique=test["technique"],
+                outcome="SKIPPED", detail=detail, expected_events=test["expected_events"]))
+            _find("INFO", f"{test['id']} skipped — no consent given")
+            continue
+
         try:
             outcome, detail = test["fn"]()
         except Exception as exc:
@@ -2288,7 +2470,7 @@ footer{{text-align:center;color:var(--muted);font-size:.8rem;margin-top:2rem;pad
 # ───────────────────────────────────────────────────────────────────────────
 
 def show_help() -> None:
-    _banner("""PURPLE TEAM AGENT v5.0
+    _banner("""PURPLE TEAM AGENT v5.1
 Advanced Adversary Simulation — Financial / Gov Sector
 Pure Windows Python Edition — LOLBAS Techniques""")
     print()
@@ -2302,8 +2484,10 @@ Pure Windows Python Edition — LOLBAS Techniques""")
     print(f"  {C.G}-l, --list{C.RS}      List available phases")
     print(f"  {C.G}-q, --quiet{C.RS}     Minimal terminal output")
     print(f"  {C.G}--report{C.RS}        Generate HTML report after execution")
-    print(f"  {C.Y}--decrypt{C.RS}      Decrypt Phase 11 simulation")
-    print(f"  {C.Y}--cleanup{C.RS}      Remove all simulation artifacts")
+    print(f"  {C.Y}--consent{C.RS}      Explicit consent: pivot demo (Phase 7) + reversible tests DT-004/005/006 (Phase 12)")
+    print(f"  {C.Y}--pivot-host{C.RS}   Target host for consented pivot demonstration (use with --consent)")
+    print(f"  {C.Y}--decrypt{C.RS}      Decrypt Phase 11 simulation (test data only)")
+    print(f"  {C.Y}--cleanup{C.RS}      Remove all simulation artifacts (ransom sim, LOLBAS demo, EICAR)")
     print()
     print(f"{C.W}PHASES:{C.RS}")
     phases = [
@@ -2314,11 +2498,11 @@ Pure Windows Python Edition — LOLBAS Techniques""")
         ("5", "Credential Access Reconnaissance", "T1555, T1003, T1552"),
         ("6", "Defense Evasion Reconnaissance", "T1562, T1218, T1027"),
         ("7", "Network & Lateral Movement Recon", "T1049, T1018, T1482"),
-        ("8", "Collection & Staging", "T1119, T1074, T1114"),
+        ("8", "Collection & Staging (Metadata Only)", "T1119, T1074, T1114, T1115"),
         ("9", "Persistence Mechanism Recon", "T1547, T1053, T1546"),
         ("10", "LOLBAS Abuse Demonstration", "T1218, T1105, T1027, T1564"),
         ("11", "Ransomware Simulation (Reversible)", "T1486, T1490, T1489"),
-        ("12", "Blue Team Detection Validation", "T1003.001, T1059.001, T1053.005, T1071"),
+        ("12", "Blue Team Detection Validation + EICAR", "T1003.001, T1059.001, T1053.005, T1071"),
     ]
     for num, title, techs in phases:
         color = C.M if num == "11" else C.CYN if num == "12" else C.G
@@ -2327,9 +2511,9 @@ Pure Windows Python Edition — LOLBAS Techniques""")
     print()
     print(f"{C.W}OUTPUT:{C.RS}")
     print(f"  Terminal: Colour-coded with findings severity")
-    print(f"  Text Log: %TEMP%\\purpleteam_*.log")
-    print(f"  JSON Log: %TEMP%\\purpleteam_*.json")
-    print(f"  HTML Report: %TEMP%\\purpleteam_*.html")
+    print(f"  Text Log: %TEMP%\\purpleteam_python_*.log")
+    print(f"  JSON Log: %TEMP%\\purpleteam_python_*.json")
+    print(f"  HTML Report: %TEMP%\\purpleteam_python_*.html")
     print()
     print(f"{C.Y} FOR AUTHORIZED PURPLE TEAM EXERCISES ONLY{C.RS}")
     print()
@@ -2352,16 +2536,16 @@ def list_phases() -> None:
          "PS logging, Sysmon, firewall, AppLocker, AMSI, audit policy", "~25s"),
         ("7", "Network & Lateral Movement Recon", "T1049, T1018, T1135, T1482, T1016",
          "Connections, shares, routing, domain trusts, RDP history", "~30s"),
-        ("8", "Collection & Staging", "T1119, T1074.001, T1114.001, T1005",
-         "Stage documents, email archives, clipboard, recent files", "~25s"),
+        ("8", "Collection & Staging (Metadata Only)", "T1119, T1074.001, T1114.001, T1005",
+         "Metadata manifest (path/size/date), email archive metadata, fake clipboard test data", "~20s"),
         ("9", "Persistence Mechanism Recon", "T1547, T1053, T1543, T1546, T1574",
          "Run keys, tasks, services, WMI, COM hijack, DLL search order", "~25s"),
         ("10", "LOLBAS Abuse Demonstration", "T1218, T1105, T1027, T1564.004",
          "Demonstrate certutil, bitsadmin, forfiles, esentutl, rundll32, mshta abuse", "~30s"),
         ("11", "Ransomware Simulation (Reversible)", "T1486, T1490, T1489, T1529",
          "Create/encrypt fake corporate files, drop ransom notes, --decrypt to reverse", "~35s"),
-        ("12", "Blue Team Detection Validation", "T1003.001, T1071, T1059.001, T1547.001, T1053.005, T1070.001, T1071.004, T1134",
-         "LSASS handle, CS named pipe, encoded PS, fake persistence, log clear, DGA DNS — real SOC alerts", "~40s"),
+        ("12", "Blue Team Detection Validation + EICAR", "T1003.001, T1071, T1059.001, T1547.001, T1053.005, T1070.001, T1071.004, T1134",
+         "LSASS handle, CS named pipe, encoded PS, EICAR safe AV test (DT-000), fake persistence, log clear, DGA DNS; DT-004/005/006 need --consent", "~40s"),
     ]
     for num, title, techs, desc, dur in detail:
         color = C.M if num == "11" else C.CYN if num == "12" else C.G
@@ -2393,7 +2577,7 @@ def show_banner() -> None:
  ║     ██║   ███████╗██║  ██║██║ ╚═╝ ██║                           ║
  ║     ╚═╝   ╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝                           ║
  ║                                                                   ║
- ║  Advanced Adversary Simulation Framework  v5.0                  ║
+ ║  Advanced Adversary Simulation Framework  v5.1                  ║
  ║  Pure Windows — LOLBAS Techniques                               ║
  ║  Financial / Government Sector TTPs                               ║
  ║                                                                   ║
@@ -2757,7 +2941,7 @@ def generate_summary(gen_report: bool = False) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Purple Team Agent v5.0 — Pure Windows Python Edition (LOLBAS)",
+        description="Purple Team Agent v5.1 — Pure Windows Python Edition (LOLBAS, guardrail edition)",
         add_help=False)
     parser.add_argument("-h", "--help", action="store_true", help="Show help")
     parser.add_argument("-a", "--all", action="store_true", help="Run all phases (default)")
@@ -2765,9 +2949,18 @@ def main() -> None:
     parser.add_argument("-l", "--list", action="store_true", help="List available phases")
     parser.add_argument("-q", "--quiet", action="store_true", help="Minimal terminal output")
     parser.add_argument("--report", action="store_true", help="Generate HTML report after execution")
-    parser.add_argument("--decrypt", action="store_true", help="Decrypt Phase 11 simulation")
-    parser.add_argument("--cleanup", action="store_true", help="Remove simulation artifacts")
+    parser.add_argument("--consent", action="store_true",
+                        help="Explicit consent: enables pivot demo (Phase 7) and reversible detection tests DT-004/005/006 (Phase 12)")
+    parser.add_argument("--pivot-host", type=str, default="",
+                        help="Target host for the consented pivot demonstration (use with --consent)")
+    parser.add_argument("--decrypt", action="store_true", help="Decrypt Phase 11 simulation (test data only)")
+    parser.add_argument("--cleanup", action="store_true", help="Remove simulation artifacts (ransom sim, LOLBAS demo, EICAR)")
     args = parser.parse_args()
+
+    # Exercise consent globals — read by phase_network and the detection tests
+    global CONSENT, PIVOT_HOST
+    CONSENT = bool(args.consent)
+    PIVOT_HOST = (args.pivot_host or "").strip()
 
     if args.help:
         show_help(); sys.exit(0)
@@ -2782,6 +2975,11 @@ def main() -> None:
     if not args.quiet:
         show_banner()
         time.sleep(1)
+    if CONSENT:
+        _warn(f"CONSENT MODE ON — pivot demo target: {PIVOT_HOST or '(readiness checks only)'}; "
+              "reversible detection tests DT-004/005/006 enabled (--consent)")
+    else:
+        _info("Consent mode OFF — Phase 7 pivot and DT-004/005/006 stay disabled (--consent to enable)")
 
     phases_map = {
         "1": phase_system, "2": phase_accounts, "3": phase_processes,
